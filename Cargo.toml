@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+async-trait = "0.1.89"
+derive_more = { version = "2.1.1", features = ["full"] }
+futures = "0.3.31"
+integer-encoding = "4.1.0"
+itertools = "0.14.0"
+logos = "0.16.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread"] }
+tokyo = "1.0.0"
