@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tempest::{
     Tempest,
-    core::DataValue,
+    core::{TempestType, TempestValue},
     kv::InMemoryKvStore,
     query::{ColumnDef, CreateTableStmt, Expr, InsertStmt, QueryStmt},
 };
@@ -21,11 +21,11 @@ async fn main() {
                 column_defs: vec![
                     ColumnDef {
                         name: "name".into(),
-                        data_type: "string".into(),
+                        tempest_type: vec![TempestType::String],
                     },
                     ColumnDef {
                         name: "age".into(),
-                        data_type: "int8".into(),
+                        tempest_type: vec![TempestType::Int8],
                     },
                 ],
                 primary_key: vec!["name".into()],
@@ -36,8 +36,11 @@ async fn main() {
 
     let table = "users".into();
     let mut columns = HashMap::new();
-    columns.insert("name".into(), Expr::Literal(DataValue::String("john".into())));
-    columns.insert("age".into(), Expr::Literal(DataValue::Int8(30)));
+    columns.insert(
+        "name".into(),
+        Expr::Literal(TempestValue::String("john".into())),
+    );
+    columns.insert("age".into(), Expr::Literal(TempestValue::Int8(30)));
     let query_stmt = QueryStmt::Insert(InsertStmt { table, columns });
     tempest.execute(db.clone(), query_stmt).await.unwrap();
 }

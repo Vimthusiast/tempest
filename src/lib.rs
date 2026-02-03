@@ -1,11 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
-    core::{CATALOG_NS, DataType},
+    core::{CATALOG_NS, TempestType},
     kv::KvStore,
 };
 
@@ -16,15 +15,15 @@ pub mod core;
 pub mod kv;
 pub mod query;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Column {
     pub(crate) name: String,
-    pub(crate) data_type: DataType,
+    pub(crate) data_type: Vec<TempestType>,
     //pub(crate) nullable: bool,
     //pub(crate) default: Option<Expr>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TableSchema {
     /// Every column's name and it's type.
     pub(crate) columns: Vec<Column>,

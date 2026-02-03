@@ -1,11 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 
 use crate::{
-    Column, DataType, TableSchema, Tempest,
-    core::{DataValue, Key, Row},
+    Column, TableSchema, Tempest, TempestType,
+    core::{Key, Row, TempestValue},
 };
 
 #[derive(logos::Logos)]
@@ -18,7 +17,7 @@ enum SqlToken<'buf> {
     Identifier(&'buf str),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum BinaryOperator {
     Eq,
     NotEq,
@@ -30,14 +29,14 @@ pub enum BinaryOperator {
     Or,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum UnaryOperator {
     Not,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Expr<'a> {
-    Literal(DataValue<'a>),
+    Literal(TempestValue<'a>),
     //Column(String),
     //BinaryOp {
     //    left: Box<Expr>,
@@ -55,7 +54,7 @@ pub struct ColumnDef {
     /// Name of the column
     pub name: String,
     /// Type of the column value
-    pub data_type: String,
+    pub tempest_type: Vec<TempestType>,
     // Is this nullable?
     //pub nullable: bool,
     // Expression for a default value
@@ -94,7 +93,7 @@ pub enum QueryPlan<'a> {
     Insert {
         table: String,
         columns: Vec<String>,
-        values: Vec<DataValue<'a>>,
+        values: Vec<TempestValue<'a>>,
     },
 }
 
@@ -111,7 +110,7 @@ pub enum QueryError {
 impl Tempest {
     // this should handle possible 'lazy evaluation' and evaluation to
     // other columns in a query later
-    fn evaluate_expr<'a>(&self, expr: &Expr<'a>) -> DataValue<'a> {
+    fn evaluate_expr<'a>(&self, expr: &Expr<'a>) -> TempestValue<'a> {
         match expr {
             Expr::Literal(lit) => lit.clone(),
         }
@@ -140,15 +139,9 @@ impl Tempest {
 
                 let mut columns = Vec::new();
                 for def in stmt.column_defs {
-                    let data_type = match def.data_type.as_ref() {
-                        "int8" => DataType::Int8,
-                        "string" => DataType::String,
-                        "bool" => DataType::Bool,
-                        _ => panic!("unknown data type: {}", def.data_type),
-                    };
                     let col = Column {
                         name: def.name,
-                        data_type,
+                        data_type: def.tempest_type,
                         //nullable: def.nullable,
                         //default: def.default,
                     };

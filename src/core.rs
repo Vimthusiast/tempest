@@ -1,23 +1,55 @@
 use std::{
     borrow::Cow,
-    io,
     str::{self, Utf8Error},
     string::FromUtf8Error,
 };
 
-use serde::{Deserialize, Serialize};
+use strum::{EnumDiscriminants, EnumString};
+
+use crate::TableSchema;
 
 pub(crate) const CATALOG_NS: u8 = 0;
 pub(crate) const DATA_NS: u8 = 1;
 
+/// A constant u64 that has the upper most bit set.
+const UPPER_U64_BIT: u64 = 0x8000_0000_0000_0000;
+
 pub(crate) fn encode_i64_sortable(val: i64) -> [u8; 8] {
-    let unsigned = (val as u64) ^ 0x8000_0000_0000_0000;
+    let unsigned = (val as u64) ^ UPPER_U64_BIT;
     unsigned.to_be_bytes()
 }
 
 pub(crate) fn decode_i64_sortable(bytes: [u8; 8]) -> i64 {
     let unsigned = u64::from_be_bytes(bytes);
-    (unsigned ^ 0x8000_0000_0000_0000) as i64
+    (unsigned ^ UPPER_U64_BIT) as i64
+}
+
+pub(crate) fn encode_f64_sortable(val: f64) -> [u8; 8] {
+    let mut bits = val.to_bits();
+
+    if (bits & UPPER_U64_BIT) == 0 {
+        // positive: flip only upper bit to make positive > negative
+        bits ^= UPPER_U64_BIT;
+    } else {
+        // negative: flip every single bit
+        bits ^= u64::MAX;
+    }
+
+    bits.to_be_bytes()
+}
+
+pub(crate) fn decode_f64_sortable(bytes: [u8; 8]) -> f64 {
+    let mut bits = u64::from_be_bytes(bytes);
+
+    if (bits & UPPER_U64_BIT) != 0 {
+        // was positive: reverse upper bit flip
+        bits ^= UPPER_U64_BIT;
+    } else {
+        // was negative: flip every single bit
+        bits ^= u64::MAX;
+    }
+
+    f64::from_bits(bits)
 }
 
 /// Encodes a null-terminated byte sequence into a buffer. The string may contain null bytes, at
@@ -95,21 +127,6 @@ pub(crate) fn decode_string_null_terminated<'buf>(
     Ok(s)
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum DataType {
-    /// 1 byte big. 0x0 for `false`, 0x1 for `true`.
-    Bool = 0,
-    /// i64 encoded in big-endian byte order.
-    Int8 = 1,
-    // TODO: implement encode/decode strat that conserves lexicographical ordering.
-    // Float8 = 2,
-    /// A varint `length`, followed by `length` bytes.
-    String = 3,
-    // Blob
-    // Bytes(u8) // A binary value with a schema-fixed length; at most 255 bytes long?
-}
-
 #[derive(Debug, From, Display, Error)]
 pub enum DecodeError {
     InvalidVarInt,
@@ -143,6 +160,8 @@ impl<'a> Key<'a> {
         }
     }
 
+    /// Transform this `Key` into one with a `'static` lifetime, by converting the `Cow::Borrowed`
+    /// smart-pointers into their respective `Cow::Owned` variants, only allocating if needed.
     pub(crate) fn into_static(self) -> Key<'static> {
         Key {
             db: Cow::Owned(self.db.into_owned()),
@@ -195,37 +214,54 @@ impl<'a> Key<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum DataValue<'a> {
-    Bool(bool),
-    Int8(i64),
-    String(Cow<'a, str>),
+#[derive(Debug, Clone, PartialEq, EnumDiscriminants)]
+#[strum_discriminants(vis(pub), name(TempestType), derive(EnumString))]
+#[repr(u8)]
+pub enum TempestValue<'a> {
+    /// 1 byte big. 0x0 for `false`, 0x1 for `true`.
+    Bool(bool) = 0,
+    /// i64 encoded in big-endian byte order.
+    Int8(i64) = 1,
+    // TODO: implement encode/decode strat that conserves lexicographical ordering.
+    Float8(f64) = 2,
+    Nullable(Box<TempestValue<'a>>) = 3,
+    /// A varint `length`, followed by `length` bytes. Valid UTF-8.
+    String(Cow<'a, str>) = 4,
+    Array(Box<TempestValue<'a>>) = 5,
+    Blob = 6,
+    // A binary value with a schema-fixed length. At most 255 bytes long.
+    Bytes(u8) = 7,
 }
 
-impl<'a> DataValue<'a> {
+impl<'a> TempestValue<'a> {
     pub fn encode(&self, buf: &mut Vec<u8>) {
         match self {
-            DataValue::Bool(b) => {
+            TempestValue::Bool(b) => {
                 buf.push(if *b { 1 } else { 0 });
             }
-            DataValue::Int8(i) => {
+            TempestValue::Int8(i) => {
                 buf.extend_from_slice(&i.to_be_bytes());
             }
-            DataValue::String(s) => {
+            TempestValue::Float8(_f) => todo!(),
+            TempestValue::Nullable(_n) => todo!(),
+            TempestValue::String(s) => {
                 use integer_encoding::VarIntWriter;
                 buf.write_varint(s.len())
                     .expect("Internal buffer failure: Encoding varints to a vec should succeed (unless OOM)");
                 buf.extend_from_slice(s.as_bytes());
             }
+            TempestValue::Array(_a) => todo!(),
+            TempestValue::Blob => todo!(),
+            TempestValue::Bytes(_b) => todo!(),
         }
     }
 
-    /// Decodes a Value of the expected DataType from a byte slice reader, advancing the reader
+    /// Decodes a Value of the expected TempestType from a byte slice reader, advancing the reader
     /// past the read bytes.
     /// When decoding fails, does not advance reader and safely returns the error.
-    pub fn decode(reader: &mut &'a [u8], data_type: DataType) -> Result<Self, DecodeError> {
+    pub fn decode(reader: &mut &'a [u8], data_type: TempestType) -> Result<Self, DecodeError> {
         match data_type {
-            DataType::Bool => {
+            TempestType::Bool => {
                 if reader.len() < 1 {
                     return Err(DecodeError::EOF);
                 }
@@ -233,9 +269,9 @@ impl<'a> DataValue<'a> {
 
                 *reader = &reader[1..];
                 // TODO: error on invalid value; for now, recover to true
-                Ok(DataValue::Bool(byte != 0))
+                Ok(TempestValue::Bool(byte != 0))
             }
-            DataType::Int8 => {
+            TempestType::Int8 => {
                 if reader.len() < 8 {
                     return Err(DecodeError::EOF);
                 }
@@ -244,9 +280,11 @@ impl<'a> DataValue<'a> {
                 let val = i64::from_be_bytes(buf);
 
                 *reader = &reader[8..];
-                Ok(DataValue::Int8(val))
+                Ok(TempestValue::Int8(val))
             }
-            DataType::String => {
+            TempestType::Float8 => todo!(),
+            TempestType::Nullable => todo!(),
+            TempestType::String => {
                 use integer_encoding::VarIntReader;
                 let len: usize = reader
                     .read_varint()
@@ -259,8 +297,11 @@ impl<'a> DataValue<'a> {
                 let s = str::from_utf8(s_bytes)?;
 
                 *reader = remaining;
-                Ok(DataValue::String(Cow::Borrowed(s)))
+                Ok(TempestValue::String(Cow::Borrowed(s)))
             }
+            TempestType::Array => todo!(),
+            TempestType::Blob => todo!(),
+            TempestType::Bytes => todo!(),
         }
     }
 
@@ -268,39 +309,44 @@ impl<'a> DataValue<'a> {
     // and increased final size.
     pub fn encode_lexicographically(&self, buf: &mut Vec<u8>) {
         match self {
-            DataValue::Bool(b) => {
+            TempestValue::Bool(b) => {
                 buf.push(if *b { 1 } else { 0 });
             }
-            DataValue::Int8(i) => {
+            TempestValue::Int8(i) => {
                 let encoded = encode_i64_sortable(*i);
                 buf.extend_from_slice(&encoded);
             }
-            DataValue::String(s) => {
+            TempestValue::Float8(_f) => todo!(),
+            TempestValue::Nullable(_n) => todo!(),
+            TempestValue::String(s) => {
                 // this is enough, as long as the value does not contain any null-bytes (unlikely)
                 buf.reserve(s.len() + 2);
                 encode_bytes_null_terminated_escaped(buf, s.as_bytes());
             }
+            TempestValue::Array(_a) => todo!(),
+            TempestValue::Blob => todo!(),
+            TempestValue::Bytes(_b) => todo!(),
         }
     }
 
-    /// Decodes a Value of the expected [`DataType`] from a byte slice reader, advancing the reader
+    /// Decodes a Value of the expected [`TempestType`] from a byte slice reader, advancing the reader
     /// past the read bytes.
     /// When decoding fails, does not advance reader and safely returns the error.
     pub fn decode_lexicographically(
         reader: &mut &[u8],
-        data_type: DataType,
+        data_type: TempestType,
     ) -> Result<Self, DecodeError> {
         match data_type {
-            DataType::Bool => {
+            TempestType::Bool => {
                 if reader.len() < 1 {
                     return Err(DecodeError::EOF);
                 }
                 let byte = reader[0];
 
                 *reader = &reader[1..];
-                Ok(DataValue::Bool(byte != 0))
+                Ok(TempestValue::Bool(byte != 0))
             }
-            DataType::Int8 => {
+            TempestType::Int8 => {
                 if reader.len() < 8 {
                     return Err(DecodeError::EOF);
                 }
@@ -309,32 +355,60 @@ impl<'a> DataValue<'a> {
                 let decoded = decode_i64_sortable(buf);
 
                 *reader = &reader[8..];
-                Ok(DataValue::Int8(decoded))
+                Ok(TempestValue::Int8(decoded))
             }
-            DataType::String => {
+            TempestType::Float8 => todo!(),
+            TempestType::Nullable => todo!(),
+            TempestType::String => {
                 let bytes = decode_bytes_null_terminated_escaped(reader)?;
                 let s = String::from_utf8(bytes)?;
-                Ok(DataValue::String(Cow::Owned(s)))
+                Ok(TempestValue::String(Cow::Owned(s)))
             }
+            TempestType::Array => todo!(),
+            TempestType::Blob => todo!(),
+            TempestType::Bytes => todo!(),
         }
     }
 }
-
 #[derive(Debug)]
 pub struct Row<'a> {
-    values: Vec<DataValue<'a>>,
+    values: Vec<TempestValue<'a>>,
 }
 
 impl<'a> Row<'a> {
-    pub fn decode(reader: &mut &[u8], schema: &[DataType]) -> Result<Self, DecodeError> {
+    pub fn encode(buf: &mut Vec<u8>, values: &[Option<TempestValue>]) {
+        let mask_base = buf.len();
+        let mask_len = (values.len() + 7) / 8;
+        // bitmask at mask_base..(mask_base + mask_len)
+        buf.extend(vec![0u8; mask_len]);
+
+        for (i, val_opt) in values.into_iter().enumerate() {
+            if let Some(val) = val_opt {
+                let byte_pos = i / 8;
+                let bit_pos = i % 8;
+                buf[mask_base + byte_pos] |= 1 << bit_pos;
+
+                val.encode(buf);
+            }
+        }
+    }
+
+    pub fn decode(reader: &mut &[u8], schema: &[TempestType]) -> Result<Self, DecodeError> {
         let mut values = Vec::with_capacity(schema.len());
 
         for data_type in schema {
-            let val = DataValue::decode(reader, *data_type)?;
+            let val = TempestValue::decode(reader, *data_type)?;
             values.push(val);
         }
 
         todo!()
+    }
+}
+
+pub(crate) struct TempestCodec;
+
+impl TempestCodec {
+    pub(crate) fn encode(schema: TableSchema) /* -> ? */ {
     }
 }
 
@@ -389,7 +463,7 @@ mod tests {
                 let val = $value;
                 val.encode(&mut $buf);
                 let mut slice = $buf.as_slice();
-                let value_dec = DataValue::decode(&mut slice, $dt).unwrap();
+                let value_dec = TempestValue::decode(&mut slice, $dt).unwrap();
                 assert_eq!(slice.len(), 0, "reader should be exhausted");
                 assert_eq!(value_dec, val, "decoded value should equal original value");
             }};
@@ -397,20 +471,20 @@ mod tests {
 
         macro_rules! test_for_bool {
             ($buf:ident, $val:expr) => {
-                test_for!($buf, DataValue::Bool($val), DataType::Bool)
+                test_for!($buf, TempestValue::Bool($val), TempestType::Bool)
             };
         }
 
         macro_rules! test_for_integer {
             ($buf:ident, $val:expr) => {
-                test_for!($buf, DataValue::Int8($val), DataType::Int8)
+                test_for!($buf, TempestValue::Int8($val), TempestType::Int8)
             };
         }
 
         macro_rules! test_for_text {
             ($buf:ident, $val:expr) => {{
                 let s = String::from($val);
-                test_for!($buf, DataValue::String(s.into()), DataType::String);
+                test_for!($buf, TempestValue::String(s.into()), TempestType::String);
             }};
         }
 
