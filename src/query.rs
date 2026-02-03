@@ -1,9 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{Column, DataType, Row, TableSchema, Tempest, Value};
+use crate::{
+    Column, DataType, TableSchema, Tempest,
+    core::{DataValue, Key, Row},
+};
 
 #[derive(logos::Logos)]
 enum SqlToken<'buf> {
@@ -33,8 +36,8 @@ pub enum UnaryOperator {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Expr {
-    Literal(Value),
+pub enum Expr<'a> {
+    Literal(DataValue<'a>),
     //Column(String),
     //BinaryOp {
     //    left: Box<Expr>,
@@ -47,6 +50,7 @@ pub enum Expr {
     //},
 }
 
+#[derive(Debug)]
 pub struct ColumnDef {
     /// Name of the column
     pub name: String,
@@ -58,6 +62,7 @@ pub struct ColumnDef {
     //pub default: Option<Expr>,
 }
 
+#[derive(Debug)]
 pub struct CreateTableStmt {
     /// Name of the table
     pub name: String,
@@ -68,19 +73,20 @@ pub struct CreateTableStmt {
     pub primary_key: Vec<String>,
 }
 
-pub struct InsertStmt {
+#[derive(Debug)]
+pub struct InsertStmt<'a> {
     pub table: String,
-    pub columns: Vec<String>,
-    pub values: Vec<Expr>,
-}
-
-pub enum QueryStmt {
-    CreateTable(CreateTableStmt),
-    Insert(InsertStmt),
+    pub columns: HashMap<String, Expr<'a>>,
 }
 
 #[derive(Debug)]
-pub enum QueryPlan {
+pub enum QueryStmt<'a> {
+    CreateTable(CreateTableStmt),
+    Insert(InsertStmt<'a>),
+}
+
+#[derive(Debug)]
+pub enum QueryPlan<'a> {
     CreateTable {
         name: String,
         schema: TableSchema,
@@ -88,7 +94,7 @@ pub enum QueryPlan {
     Insert {
         table: String,
         columns: Vec<String>,
-        values: Vec<Value>,
+        values: Vec<DataValue<'a>>,
     },
 }
 
@@ -103,8 +109,21 @@ pub enum QueryError {
 }
 
 impl Tempest {
-    async fn plan_execution(&self, sql: QueryStmt) -> Result<QueryPlan, QueryError> {
-        match sql {
+    // this should handle possible 'lazy evaluation' and evaluation to
+    // other columns in a query later
+    fn evaluate_expr<'a>(&self, expr: &Expr<'a>) -> DataValue<'a> {
+        match expr {
+            Expr::Literal(lit) => lit.clone(),
+        }
+    }
+
+    async fn plan_execution(
+        &self,
+        db: String,
+        query: QueryStmt<'_>,
+    ) -> Result<QueryPlan<'_>, QueryError> {
+        println!("Planning query: {:#?}", query);
+        match query {
             QueryStmt::CreateTable(stmt) => {
                 // check for duplicates
                 let mut duplicates = Vec::new();
@@ -136,21 +155,21 @@ impl Tempest {
                     columns.push(col)
                 }
 
-                let mut primary_key = Vec::new();
-                for col in stmt.primary_key {
-                    let pos = columns
-                        .iter()
-                        .position(|c| c.name == col)
-                        .ok_or_else(|| QueryError::ColumnDoesNotExist(col.clone()))?;
-                    if primary_key.contains(&pos) {
-                        println!(
-                            "WARNING: duplicate definition of column for primary key found in query for '{}'",
-                            col
-                        );
-                        continue;
-                    }
-                    primary_key.push(pos);
+                let pk_duplicates = stmt.primary_key.iter().duplicates().cloned().collect_vec();
+                if pk_duplicates.len() > 0 {
+                    return Err(QueryError::DuplicateColumnNames(pk_duplicates));
                 }
+
+                let primary_key = stmt
+                    .primary_key
+                    .into_iter()
+                    .map(|pk_name| {
+                        columns
+                            .iter()
+                            .position(|col| col.name == pk_name)
+                            .ok_or_else(|| QueryError::ColumnDoesNotExist(pk_name))
+                    })
+                    .try_collect()?;
 
                 let schema = TableSchema {
                     columns,
@@ -162,15 +181,89 @@ impl Tempest {
                     schema,
                 })
             }
-            QueryStmt::Insert(stmt) => todo!(),
+            QueryStmt::Insert(stmt) => {
+                let Some(schema) = self
+                    .catalog
+                    .get_schema(db.clone(), stmt.table.clone())
+                    .await
+                else {
+                    return Err(QueryError::TableDoesNotExist(stmt.table));
+                };
+
+                // get the key columns from the schema
+                let schema_pk_cols = schema
+                    .primary_key
+                    .iter()
+                    .map(|&i| &schema.columns[i])
+                    .collect_vec();
+                // check if any pk is missing from the insert statement
+                let missing_pks = schema_pk_cols
+                    .iter()
+                    .map(|&pk| &pk.name)
+                    // NB: here, we could also let through if the column has a default definition that
+                    // can be evaluated successfully, i.e. not another unsupplied column.
+                    // NB: we should likely evaluate unsupplied columns with defaults before, do
+                    // keep this simple here, just like it is now
+                    .filter(|schema_pk| {
+                        // TODO: horrible performance here? check that
+                        !stmt.columns.keys().contains(schema_pk)
+                    })
+                    .cloned();
+
+                // get the value columns from the schema
+                let schema_value_cols = schema
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, col)| {
+                        if !schema.primary_key.contains(&idx) {
+                            Some(col)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect_vec();
+                // check which value columns are missing
+                let missing_value_cols = schema_value_cols
+                    .iter()
+                    .map(|col| &col.name)
+                    .filter(|schema_value_col| !stmt.columns.keys().contains(schema_value_col))
+                    .cloned();
+
+                let missing_cols = missing_pks.chain(missing_value_cols).collect_vec();
+                if missing_cols.len() > 0 {
+                    return Err(QueryError::RequiredColumnsNotProvided(missing_cols));
+                }
+
+                // now we have every required value and can begin encoding the kv pair
+                let mut pk_bytes = Vec::new();
+                for val_expr in schema_pk_cols.iter().map(|col| {
+                    stmt.columns
+                        .get(&col.name)
+                        .expect("just checked that every col is supplied")
+                }) {
+                    // evaluate expression
+                    let val = self.evaluate_expr(val_expr);
+                    // store value in primary key bytes
+                    val.encode_lexicographically(&mut pk_bytes);
+                }
+                let key = Key::new_borrowed(&db, &stmt.table, &pk_bytes);
+                let key_bytes = key.encode();
+                println!(
+                    "encoded key bytes: [{}]",
+                    key_bytes.iter().map(|b| format!("{:02x}", b)).join(" ")
+                );
+
+                todo!()
+            }
         }
     }
 
     pub async fn execute_plan(
         &self,
         database: String,
-        plan: QueryPlan,
-    ) -> Result<Vec<Row>, QueryError> {
+        plan: QueryPlan<'_>,
+    ) -> Result<Vec<Row<'_>>, QueryError> {
         println!("Executing query {:#?}", plan);
         let rows = Vec::new();
         match plan {
@@ -210,9 +303,13 @@ impl Tempest {
     }
 
     /// Execute a sql statement. Currently the input sql is the raw ast, but may be a string later.
-    pub async fn execute(&self, database: String, sql: QueryStmt) -> Result<Vec<Row>, QueryError> {
+    pub async fn execute(
+        &self,
+        database: String,
+        sql: QueryStmt<'_>,
+    ) -> Result<Vec<Row<'_>>, QueryError> {
         // -- Phase 1: Query Statement Planning --
-        let plan = self.plan_execution(sql).await?;
+        let plan = self.plan_execution(database.clone(), sql).await?;
 
         // -- Phase 2: Execute the Query --
         self.execute_plan(database, plan).await

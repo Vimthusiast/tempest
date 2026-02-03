@@ -1,4 +1,11 @@
-use tempest::{ColumnDef, CreateTableStmt, InMemoryKvStore, QueryStmt, Tempest};
+use std::collections::HashMap;
+
+use tempest::{
+    Tempest,
+    core::DataValue,
+    kv::InMemoryKvStore,
+    query::{ColumnDef, CreateTableStmt, Expr, InsertStmt, QueryStmt},
+};
 
 #[tokio::main]
 async fn main() {
@@ -26,4 +33,11 @@ async fn main() {
         )
         .await
         .unwrap();
+
+    let table = "users".into();
+    let mut columns = HashMap::new();
+    columns.insert("name".into(), Expr::Literal(DataValue::String("john".into())));
+    columns.insert("age".into(), Expr::Literal(DataValue::Int8(30)));
+    let query_stmt = QueryStmt::Insert(InsertStmt { table, columns });
+    tempest.execute(db.clone(), query_stmt).await.unwrap();
 }
