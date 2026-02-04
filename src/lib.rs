@@ -1,8 +1,13 @@
 use std::sync::Arc;
 
+#[macro_use]
+extern crate derive_more;
+
 use crate::kv::KvStore;
 
-mod kv;
+pub mod core;
+pub mod kv;
+pub mod prelude;
 
 /// Tempest implementation. Always uses the first byte of the key for the namespace.
 ///
