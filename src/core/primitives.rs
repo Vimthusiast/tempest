@@ -26,6 +26,17 @@ impl<'a> TempestStr<'a> {
     }
 }
 
+impl<'a> TryFrom<&'a str> for TempestStr<'a> {
+    type Error = TempestError;
+
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        if s.contains('\0') {
+            return Err(TempestError::InvalidNullByte);
+        }
+        Ok(Self(Cow::Borrowed(s)))
+    }
+}
+
 impl<'a> TryFrom<Cow<'a, str>> for TempestStr<'a> {
     type Error = TempestError;
 
@@ -43,14 +54,38 @@ impl<'a> Into<Cow<'a, str>> for TempestStr<'a> {
     }
 }
 
-impl AsRef<[u8]> for TempestStr<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
 impl AsRef<str> for TempestStr<'_> {
     fn as_ref(&self) -> &str {
         self.0.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tempest_str() {
+        let safe_strings = [
+            "A chance", "for", "Faramir", "to", "show", "his", "quantity", "",
+        ];
+        let unsafe_strings = ["These\0", "are\0", "intended\0", "to\0", "fail\0", "\0"];
+
+        for s in safe_strings {
+            let ts = TempestStr::try_from(s)
+                .expect("this should succeed, as the safe strings do not contain null-bytes");
+            assert_eq!(
+                s,
+                ts.as_ref(),
+                "the inner TempestStr value should be equal to the original &str value"
+            );
+        }
+
+        for s in unsafe_strings {
+            assert!(
+                TempestStr::try_from(s).is_err(),
+                "this should fail, as the unsafe strings contain null-bytes"
+            )
+        }
     }
 }
