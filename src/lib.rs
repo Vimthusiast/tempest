@@ -5,8 +5,8 @@ extern crate derive_more;
 
 use crate::kv::KvStore;
 
-pub mod core;
-pub mod kv;
+pub(crate) mod core;
+pub(crate) mod kv;
 pub mod prelude;
 
 /// Tempest implementation. Always uses the first byte of the key for the namespace.

@@ -1,13 +1,13 @@
 use std::borrow::Cow;
 
-use crate::core::{NS, TempestError, TempestReader, TempestStr, TempestWriter};
-
-
+use crate::core::{
+    NS, errors::TempestError, io::{TempestReader, TempestWriter}, primitives::TempestStr
+};
 
 /// A key for a value within tempest.
 /// Generally every key must be stored in the [`NS::DATA`] namespace.
 #[derive(Debug, PartialEq, Eq)]
-pub struct TempestKey<'a> {
+pub(crate) struct TempestKey<'a> {
     /// Null-terminated string that identifies the database.
     /// Must not contain any `\0` byte.
     db: TempestStr<'a>,
@@ -92,10 +92,9 @@ impl TempestKey<'_> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use crate::core::SliceReader;
+    use crate::core::io::SliceReader;
 
     use super::*;
 
