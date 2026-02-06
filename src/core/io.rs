@@ -1,6 +1,12 @@
 use std::borrow::Cow;
 
-use crate::core::{encoding::{decode_f64_sortable, decode_i64_sortable, encode_f64_sortable, encode_i64_sortable}, errors::DecodeError, primitives::TempestStr};
+use crate::core::{
+    encoding::{
+        decode_f64_sortable, decode_i64_sortable, encode_f64_sortable, encode_i64_sortable,
+    },
+    errors::DecodeError,
+    primitives::TempestStr,
+};
 
 /// The internal trait for any buffer that can be read from.
 /// For an implementation, see [`SliceReader`].
@@ -320,5 +326,35 @@ mod tests {
             slice_reader.is_eof(),
             "reader should have reached end of byte sequence"
         );
+
+        // (value, expected, is_owned)
+        let encoded_cases = [
+            // orphan case: a null-byte not followed by \xFF is recovered silently
+            ("\x01\0\x02\0\0".as_ref(), "\x01\0\x02", false),
+            // empty case
+            ("\0\0".as_ref(), "", false),
+            // cloned cow case
+            ([0, 0xFF, 0x42, 0, 0xFF, 0, 0].as_ref(), "\0B\0", true),
+        ];
+
+        let buf: Vec<_> = encoded_cases
+            .iter()
+            .map(|(value, _expected, _borrowed)| *value)
+            .flatten()
+            .copied()
+            .collect();
+        let mut slice_reader = SliceReader::new(&buf);
+        let mut i = 0;
+        while i < encoded_cases.len() {
+            let (_, expected, owned) = encoded_cases[i];
+            let decoded = slice_reader.decode_bytes_null_terminated_escaped().unwrap();
+            assert_eq!(decoded, expected.as_bytes());
+            assert_eq!(matches!(decoded, Cow::Owned(_)), owned);
+            i += 1;
+        }
+        assert!(
+            slice_reader.is_eof(),
+            "reader should have reached end of byte sequence"
+        )
     }
 }
