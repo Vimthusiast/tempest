@@ -8,38 +8,26 @@ use crate::kv::KvStore;
 pub(crate) mod core;
 pub(crate) mod kv;
 pub mod prelude;
+pub(crate) mod query;
 
 /// Tempest implementation. Always uses the first byte of the key for the namespace.
 ///
-/// ## Datatypes
-///
-/// ### Boolean
-///
-/// Stored as a single byte of `0` or `1`.
-///
-/// ### Integer
-///
-/// Encoded in a way that retains lexicographical ordering for negative values.
-///
-/// ### String
-///
-/// Strings must only contain valid UTF-8. For other data, see Blob (todo).
-///
-// TODO:
-// - Blob
-///
 /// ## Basic Key Layout
 ///
-/// `[NS] + [DB_NAME] + [0] + [TABLE_NAME] + [0]`
+/// **`[NS] + [DB_NAME] + [0] + [TABLE_NAME] + [0]` (+ [INDEX_BYTES]) + [PK_BYTES]:**
 ///
-/// - `[NS]`: Namespace (Single Byte)
-/// - `[DB_NAME]`: Database Name (String; null-terminated)
-/// - `[TABLE_NAME]`: Table Name (String; null-terminated)
+/// - `[NS]`: Namespace (`u8`)
+/// - `[DB_NAME]`: Database Name ([`TempestStr`])
+/// - `[TABLE_NAME]`: Table Name ([`TempestStr`])
+/// - `[INDEX_BYTES]`: Bytes of the columns used for an index.
+/// - `[PK_BYTES]`: Bytes of the primary key.
 ///
 /// ## Namespaces
 ///
-/// - [`CATALOG_NS`]: catalog namespace
-/// - [`DATA_NS`]: data namespace
+/// Tempest namespaces are defined by the [`NS`] enum:
+///
+/// - [`NS::CATALOG`]: catalog namespace
+/// - [`NS::DATA`]: data namespace
 ///
 /// ### Catalog Namespace
 ///
@@ -49,8 +37,10 @@ pub mod prelude;
 ///
 /// This contains the data of all databases.
 ///
-/// [`CATALOG_NS`]: crate::core::CATALOG_NS
-/// [`DATA_NS`]: crate::core::DATA_NS
+/// [`TempestStr`]: crate::core::TempestStr
+/// [`NS`]: crate::core::NS
+/// [`NS::CATALOG`]: crate::core::NS::CATALOG
+/// [`NS::DATA`]: crate::core::NS::DATA
 /// [`Catalog`]: crate::Catalog
 pub struct Tempest {
     kv: Arc<dyn KvStore>,

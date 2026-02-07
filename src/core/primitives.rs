@@ -12,7 +12,20 @@ pub enum NS {
     DATA = 1,
 }
 
+/// # TempestStr
+///
 /// A wrapper around the Rust strings that forces the string to not have any null-byte (`\0`).
+/// It makes use of the [`Cow<'a, B>`] smart-pointer, to avoid as many allocations as possible, for
+/// example during the reading and decoding of table keys.
+///
+/// ## Lifetime
+///
+/// The lifetime `'a` of this type expresses if it is either stored within another buffer, in which
+/// case `'a` is bound to the lifetime of said buffer, or it owns the underlying allocation; then
+/// it will have `'a` defined as `'static`.
+///
+/// You can use [`TempestStr::into_static`] to convert this string into an owned variant, while
+/// still avoiding the reallocation if it happens to be owned already.
 #[derive(Debug, PartialEq, Eq, Deref)]
 pub(crate) struct TempestStr<'a>(pub(in crate::core) Cow<'a, str>);
 
@@ -23,6 +36,11 @@ impl<'a> TempestStr<'a> {
 
     pub(crate) fn into_static(self) -> TempestStr<'static> {
         TempestStr(Cow::Owned(self.0.into_owned()))
+    }
+
+    /// Creates a `TempestStr<'a>` from a `&'a TempestStr<'a>` without cloning the inner `Cow`.
+    pub(crate) fn borrowed_clone(&'a self) -> TempestStr<'a> {
+        TempestStr(Cow::Borrowed(self.0.as_ref()))
     }
 }
 

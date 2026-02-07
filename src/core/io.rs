@@ -80,13 +80,29 @@ pub(crate) trait TempestReader<'a> {
         self.read_slice_from(start, total_len)
     }
 
-    fn read_i64_sortable(&mut self) -> Result<i64, DecodeError> {
+    fn read_bool(&mut self) -> Result<bool, DecodeError> {
+        self.read_u8().map(|v| v != 0)
+    }
+
+    fn read_i64(&mut self) -> Result<i64, DecodeError> {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(self.read_slice(8)?);
+        Ok(i64::from_be_bytes(buf))
+    }
+
+    fn read_i64_lexic(&mut self) -> Result<i64, DecodeError> {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(self.read_slice(8)?);
         Ok(decode_i64_sortable(bytes))
     }
 
-    fn read_f64_sortable(&mut self) -> Result<f64, DecodeError> {
+    fn read_f64(&mut self) -> Result<f64, DecodeError> {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(self.read_slice(8)?);
+        Ok(f64::from_be_bytes(bytes))
+    }
+
+    fn read_f64_lexic(&mut self) -> Result<f64, DecodeError> {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(self.read_slice(8)?);
         Ok(decode_f64_sortable(bytes))
@@ -240,11 +256,23 @@ pub(crate) trait TempestWriter {
     /// Writes a slice of bytes.
     fn write_bytes(&mut self, bytes: &[u8]);
 
-    fn write_i64_sortable(&mut self, val: i64) {
+    fn write_bool(&mut self, val: bool) {
+        self.write_u8(if val { 1 } else { 0 });
+    }
+
+    fn write_i64(&mut self, val: i64) {
+        self.write_bytes(&val.to_be_bytes());
+    }
+
+    fn write_i64_lexic(&mut self, val: i64) {
         self.write_bytes(&encode_i64_sortable(val));
     }
 
-    fn write_f64_sortable(&mut self, val: f64) {
+    fn write_f64(&mut self, val: f64) {
+        self.write_bytes(&val.to_be_bytes());
+    }
+
+    fn write_f64_lexic(&mut self, val: f64) {
         self.write_bytes(&encode_f64_sortable(val));
     }
 
