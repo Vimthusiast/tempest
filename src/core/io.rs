@@ -45,11 +45,15 @@ pub(crate) trait TempestReader<'a> {
     fn read_u8(&mut self) -> Result<u8, DecodeError>;
 
     /// Reads a specified length of `len` bytes, if the reader still has that many bytes left.
+    /// This will advance the reader, when reading successfullly.
     fn read_slice(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
-        self.read_slice_from(self.position(), len)
+        let slice = self.read_slice_from(self.position(), len)?;
+        self.advance(len)?;
+        Ok(slice)
     }
 
     /// Reads a specified length of `len` bytes, starting from the byte position `start`.
+    /// This will not advance the reader.
     fn read_slice_from(&mut self, start: usize, len: usize) -> Result<&'a [u8], DecodeError>;
 
     /// Reads until the predicate `f` is met, returning the slice which was advanced over.

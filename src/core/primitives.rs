@@ -38,7 +38,7 @@ impl<'a> TempestStr<'a> {
         TempestStr(Cow::Owned(self.0.into_owned()))
     }
 
-    /// Creates a `TempestStr<'a>` from a `&'a TempestStr<'a>` without cloning the inner `Cow`.
+    /// Creates a `TempestStr<'a>` from a `&'a TempestStr<'a>` while never cloning the inner `Cow`.
     pub(crate) fn borrowed_clone(&'a self) -> TempestStr<'a> {
         TempestStr(Cow::Borrowed(self.0.as_ref()))
     }

@@ -6,7 +6,20 @@ use crate::core::primitives::NS;
 
 #[derive(Debug, Display, Error, From)]
 pub enum DecodeError {
+    #[display("Unexpected end of file.")]
     UnexpectedEof,
+    /// `(bytes_left, decode_source)`
+    /// Returned when `decode_source` should be exhausted, but still has `bytes_left` in it.
+    #[display(
+        "{} has {} bytes left after decoding, but should have been exhausted.",
+        _1,
+        _0
+    )]
+    RemainingBytes(
+        #[error(not(source))] usize,
+        #[error(not(source))] &'static str,
+    ),
+    #[display("UTF-8 Error: {}", _0)]
     Utf8Error(Utf8Error),
 }
 

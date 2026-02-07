@@ -2,7 +2,7 @@ use strum::EnumDiscriminants;
 
 use crate::core::{DecodeError, TempestReader, TempestWriter};
 
-#[derive(Debug, EnumDiscriminants)]
+#[derive(Debug, Clone, PartialEq, EnumDiscriminants)]
 #[strum_discriminants(name(TempestType))]
 #[repr(u8)]
 pub(crate) enum TempestValue {

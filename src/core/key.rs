@@ -1,7 +1,10 @@
 use std::borrow::Cow;
 
 use crate::core::{
-    NS, errors::TempestError, io::{TempestReader, TempestWriter}, primitives::TempestStr
+    NS,
+    errors::TempestError,
+    io::{TempestReader, TempestWriter},
+    primitives::TempestStr,
 };
 
 /// A key for a value within tempest.
@@ -20,6 +23,29 @@ pub(crate) struct TempestKey<'a> {
 }
 
 impl TempestKey<'_> {
+    #[inline(always)]
+    pub(crate) const fn prefix_size(db_len: usize, table_len: usize) -> usize {
+        return
+            // namespace
+            1
+            // db name + null-term
+            + db_len + 1
+            // table name + null-term
+            + table_len + 1;
+    }
+
+    pub(crate) fn encode_prefix<W: TempestWriter>(
+        writer: &mut W,
+        db: TempestStr<'_>,
+        table: TempestStr<'_>,
+    ) {
+        let prefix_size = Self::prefix_size(db.len(), table.len());
+        writer.reserve(prefix_size);
+        writer.write_u8(NS::DATA as u8);
+        writer.write_string_null_terminated(&db);
+        writer.write_string_null_terminated(&table);
+    }
+
     pub(crate) fn new_borrowed<'a>(
         db: TempestStr<'a>,
         table: TempestStr<'a>,
@@ -53,15 +79,7 @@ impl TempestKey<'_> {
     }
 
     pub(crate) fn encode<W: TempestWriter>(&self, writer: &mut W) {
-        let key_size =
-            // namespace
-            1
-            // db name + null-term
-            + self.db.len() + 1
-            // table name + null-term
-            + self.table.len() + 1
-            // primary key bytes (already encoded)
-            + self.pk_bytes.len();
+        let key_size = Self::prefix_size(self.db.len(), self.table.len()) + self.pk_bytes.len();
         writer.reserve(key_size);
         writer.write_u8(NS::DATA as u8);
         writer.write_string_null_terminated(&self.db);
