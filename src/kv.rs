@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ops::Bound, sync::Arc};
 
 use async_trait::async_trait;
 use futures::{
@@ -11,7 +11,11 @@ use tokio::sync::RwLock;
 pub trait KvStore: Send + Sync {
     async fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     async fn set(&self, key: Vec<u8>, value: Option<Vec<u8>>);
-    fn scan(&self, start: Vec<u8>, end: Vec<u8>) -> BoxStream<'_, (Vec<u8>, Vec<u8>)>;
+    fn scan<'a>(
+        &self,
+        start: Bound<&'a [u8]>,
+        end: Bound<&'a [u8]>,
+    ) -> BoxStream<'a, (Vec<u8>, Vec<u8>)>;
 }
 
 #[derive(Default)]
@@ -39,14 +43,18 @@ impl KvStore for InMemoryKvStore {
         }
     }
 
-    fn scan(&self, start: Vec<u8>, end: Vec<u8>) -> BoxStream<'_, (Vec<u8>, Vec<u8>)> {
+    fn scan<'a>(
+        &self,
+        start: Bound<&'a [u8]>,
+        end: Bound<&'a [u8]>,
+    ) -> BoxStream<'a, (Vec<u8>, Vec<u8>)> {
         let inner_clone = self.inner.clone();
 
         stream::once(async move {
-            let read_guard = inner_clone.read().await;
+            let read_guard = inner_clone.read_owned().await;
 
             let data: Vec<(Vec<u8>, Vec<u8>)> = read_guard
-                .range(start..end)
+                .range::<[u8], _>((start, end))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             data
