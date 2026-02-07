@@ -12,16 +12,6 @@ pub(crate) mod query;
 
 /// Tempest implementation. Always uses the first byte of the key for the namespace.
 ///
-/// ## Basic Key Layout
-///
-/// **`[NS] + [DB_NAME] + [0] + [TABLE_NAME] + [0]` (+ [INDEX_BYTES]) + [PK_BYTES]:**
-///
-/// - `[NS]`: Namespace (`u8`)
-/// - `[DB_NAME]`: Database Name ([`TempestStr`])
-/// - `[TABLE_NAME]`: Table Name ([`TempestStr`])
-/// - `[INDEX_BYTES]`: Bytes of the columns used for an index.
-/// - `[PK_BYTES]`: Bytes of the primary key.
-///
 /// ## Namespaces
 ///
 /// Tempest namespaces are defined by the [`NS`] enum:

@@ -7,8 +7,29 @@ use crate::core::{
     primitives::TempestStr,
 };
 
-/// A key for a value within tempest.
-/// Generally every key must be stored in the [`NS::DATA`] namespace.
+/// # Tempest Key
+///
+/// A key for a key-value pair i.e. a row within Tempest.
+///
+/// ## Layout
+///
+/// `[NS::DATA] + [DB] + [TABLE] + [INDEX_BYTES] + [PK_BYTES]`:
+///
+/// - [`NS::DATA`]: Every key-value pair of Tempest databases starts with this prefix.
+/// - [`DB_NAME`]: A string that refers to the database this row belongs to.
+/// - [`TABLE_NAME`]: A string that refers to the table this row belongs to.
+/// - [`INDEX_BYTES`]: May have some bytes that allows for creating indices over the dataset for
+///   efficient retrieval, by having rows be sorted and `O(log(n))` accessible based on that index,
+///   through use of algorithms like binary-search (ignoring disc read performance impact here).
+/// - [`PK_BYTES`]: Primary key encoded bytes that can be decoded into the primary key values.
+///   This will result in the rows being ordered by the primary keys, automatically allowing for
+///   efficient retrieval, just like with the `[INDEX_BYTES]`.
+///
+/// [`Tempest`]: crate::Tempest
+/// [`DB_NAME`]: Self::db
+/// [`TABLE_NAME`]: Self::table
+/// [`INDEX_BYTES`]: Self::index_bytes
+/// [`PK_BYTES`]: Self::pk_bytes
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TempestKey<'a> {
     /// Null-terminated string that identifies the database.
@@ -17,6 +38,8 @@ pub(crate) struct TempestKey<'a> {
     /// Null-terminated string that identifies the table.
     /// Must not contain any `\0` byte.
     table: TempestStr<'a>,
+    // TODO: Additional index bytes for faster reads at the cost of more storage space.
+    // index_bytes: Cow<'a, [u8]>
     /// Final byte-encoded version of the primary key(s).
     /// May contain `\0` bytes.
     pk_bytes: Cow<'a, [u8]>,
