@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, ops::Bound};
 
 use crate::core::{
     NS,
@@ -6,6 +6,28 @@ use crate::core::{
     io::{TempestReader, TempestWriter},
     primitives::TempestStr,
 };
+
+pub(crate) fn successor(mut prefix: Vec<u8>) -> Option<Vec<u8>> {
+    while let Some(last_byte) = prefix.pop() {
+        if last_byte < 0xFF {
+            // Found a byte we can increment
+            prefix.push(last_byte + 1);
+            return Some(prefix);
+        }
+        // If it was 0xFF, it stays popped (the carry)
+    }
+    // If the loop finishes, the prefix was all 0xFFs or empty
+    None
+}
+
+pub(crate) fn prefix_range(prefix: Vec<u8>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    let start = Bound::Included(prefix.clone());
+    let end = match successor(prefix) {
+        Some(succ) => Bound::Excluded(succ),
+        None => Bound::Unbounded,
+    };
+    (start, end)
+}
 
 /// # Tempest Key
 ///
@@ -167,5 +189,49 @@ mod tests {
                 "reader should have reached end of byte sequence"
             );
         }
+    }
+
+    #[test]
+    fn test_successor_prefix() {
+        // Standard case: increment last byte
+        assert_eq!(successor(vec![1, 2, 3]), Some(vec![1, 2, 4]));
+
+        // Incrementing 0x00 (shouldn't be different from the standard case)
+        assert_eq!(successor(vec![1, 0]), Some(vec![1, 1]));
+
+        // Ripple case: last byte is 0xFF, carry to the left
+        assert_eq!(successor(vec![1, 2, 255]), Some(vec![1, 3]));
+
+        // Multiple ripple case: multiple 0xFFs
+        assert_eq!(successor(vec![1, 255, 255]), Some(vec![2]));
+
+        // Ceiling case: all bytes are 0xFF
+        assert_eq!(successor(vec![255, 255]), None);
+
+        // Empty case
+        assert_eq!(successor(vec![]), None);
+    }
+
+    #[test]
+    fn test_prefix_range() {
+        // Normal table prefix
+        let prefix = vec![1, 100, 0];
+        let (start, end) = prefix_range(prefix.clone());
+
+        assert_eq!(start, Bound::Included(vec![1, 100, 0]));
+        assert_eq!(end, Bound::Excluded(vec![1, 100, 1]));
+
+        // Prefix ending in 0xFF (ripple)
+        let prefix_ff = vec![1, 255];
+        let (start_ff, end_ff) = prefix_range(prefix_ff.clone());
+
+        assert_eq!(start_ff, Bound::Included(vec![1, 255]));
+        assert_eq!(end_ff, Bound::Excluded(vec![2]));
+
+        // Unbounded ceiling
+        let prefix_max = vec![255, 255];
+        let (_, end_max) = prefix_range(prefix_max);
+
+        assert_eq!(end_max, Bound::Unbounded);
     }
 }
