@@ -8,5 +8,5 @@ pub(crate) mod value;
 
 pub(crate) use errors::{DecodeError, TempestError};
 pub(crate) use io::{SliceReader, TempestReader, TempestWriter};
-pub(crate) use key::TempestKey;
+pub(crate) use key::{TempestKey, prefix_range, successor};
 pub(crate) use primitives::{NS, TempestStr};
