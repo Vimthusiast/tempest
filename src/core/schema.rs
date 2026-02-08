@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use crate::{core::{
-    DecodeError, NS, SliceReader, TempestReader, TempestStr, TempestWriter,
-    value::{TempestType, TempestValue},
-}, kv::KvStore};
+use crate::{
+    core::{
+        DecodeError, NS, SliceReader, TempestReader, TempestStr, TempestWriter,
+        value::{TempestType, TempestValue},
+    },
+    kv::KvStore,
+};
 
 #[derive(Debug)]
 pub(crate) struct ColumnSchema {
@@ -79,7 +82,7 @@ impl<'a> RowEncoder<'a> {
     fn new(db: &'a TempestStr<'a>, schema: &'a TableSchema) -> Self {
         let value_indices = schema.value_indices();
         let mut prefix_bytes = Vec::with_capacity(3 + db.len() + schema.name.len());
-        prefix_bytes.write_u8(NS::DATA as u8);
+        prefix_bytes.write_u8(NS::DATA.into());
         prefix_bytes.write_string_null_terminated(db);
         prefix_bytes.write_string_null_terminated(&schema.name);
         Self {

@@ -86,7 +86,7 @@ impl TempestKey<'_> {
     ) {
         let prefix_size = Self::prefix_size(db.len(), table.len());
         writer.reserve(prefix_size);
-        writer.write_u8(NS::DATA as u8);
+        writer.write_u8(NS::DATA.into());
         writer.write_string_null_terminated(&db);
         writer.write_string_null_terminated(&table);
     }
@@ -126,7 +126,7 @@ impl TempestKey<'_> {
     pub(crate) fn encode<W: TempestWriter>(&self, writer: &mut W) {
         let key_size = Self::prefix_size(self.db.len(), self.table.len()) + self.pk_bytes.len();
         writer.reserve(key_size);
-        writer.write_u8(NS::DATA as u8);
+        writer.write_u8(NS::DATA.into());
         writer.write_string_null_terminated(&self.db);
         writer.write_string_null_terminated(&self.table);
         writer.write_bytes(&self.pk_bytes);

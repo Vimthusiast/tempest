@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 
-use num_enum::TryFromPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::core::errors::TempestError;
 
 /// Every Key will begin with a byte that declares a namespace.
-#[derive(Debug, Clone, Copy, Display, TryFromPrimitive)]
+#[derive(Debug, Clone, Copy, Display, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum NS {
     CATALOG = 0,
