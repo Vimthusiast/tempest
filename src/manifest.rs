@@ -5,7 +5,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::{fs, io, sync::RwLock};
+use tokio::{
+    fs,
+    io::{self, AsyncWriteExt},
+    sync::RwLock,
+};
 
 use crate::{
     core::{DecodeError, SliceReader, TempestError, TempestReader, TempestWriter},
@@ -85,6 +89,7 @@ pub const MANIFEST_FILE_NAME: &'static str = "MANIFEST";
 pub struct FileSystemManifestManager {
     current_manifest: Arc<RwLock<Manifest>>,
     manifest_path: PathBuf,
+    tmp_manifest_path: PathBuf,
 }
 
 impl FileSystemManifestManager {
@@ -92,6 +97,7 @@ impl FileSystemManifestManager {
     /// The [`Manifest`]-file is stored as [`MANIFEST_FILE_NAME`] within the `data_dir` directory.
     pub async fn open(data_dir: impl AsRef<Path>) -> Result<Self, TempestError> {
         let manifest_path = data_dir.as_ref().join(MANIFEST_FILE_NAME);
+        let tmp_manifest_path = manifest_path.join(".tmp");
 
         println!("Reading Manifest file: {:?}.", &manifest_path);
         let manifest = match fs::read(&manifest_path).await {
@@ -120,15 +126,31 @@ impl FileSystemManifestManager {
         let current_manifest = RwLock::new(manifest).into();
 
         Ok(Self {
-            manifest_path,
             current_manifest,
+            manifest_path,
+            tmp_manifest_path,
         })
     }
 
     async fn write_manifest(&self, manifest: &Manifest) -> io::Result<()> {
+        // encode the manifest into the buffer
         let mut manifest_bytes = Vec::new();
         manifest.encode(&mut manifest_bytes);
-        fs::write(&self.manifest_path, manifest_bytes).await
+
+        // write out the buffer to a temporary file
+        let mut tmp_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&self.tmp_manifest_path)
+            .await?;
+        tmp_file.write_all(&manifest_bytes).await?;
+        tmp_file.sync_all().await?;
+        drop(tmp_file);
+
+        // rename file at once to prevent partial writes
+        fs::rename(&self.tmp_manifest_path, &self.manifest_path).await?;
+
+        Ok(())
     }
 }
 
