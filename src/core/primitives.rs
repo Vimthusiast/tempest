@@ -26,7 +26,7 @@ pub enum NS {
 ///
 /// You can use [`TempestStr::into_static`] to convert this string into an owned variant, while
 /// still avoiding the reallocation if it happens to be owned already.
-#[derive(Debug, PartialEq, Eq, Deref)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deref)]
 pub(crate) struct TempestStr<'a>(pub(in crate::core) Cow<'a, str>);
 
 impl<'a> TempestStr<'a> {
