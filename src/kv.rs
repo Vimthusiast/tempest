@@ -14,6 +14,9 @@ pub struct SeqNum(NonMaxU64);
 
 impl SeqNum {
     pub const ZERO: Self = unsafe { Self::new_unchecked(0) };
+    /// The first sequence number used for keys.
+    /// 1-15 are reserved for later use
+    pub const START: Self = unsafe { Self::new_unchecked(16) };
     pub const MAX: Self = unsafe { Self::new_unchecked((1 << 56) - 1) };
 
     pub(crate) fn new(val: u64) -> Option<Self> {
@@ -21,9 +24,15 @@ impl SeqNum {
             return None;
         }
         // SAFETY: Just checked that `val` is never greater than 2^56-1
-        return Some(Self(unsafe { NonMaxU64::new_unchecked(val) }));
+        return Some(unsafe { Self::new_unchecked(val) });
     }
 
+    /// Creates a new `SeqNum` without verifying that it is within bounds.
+    ///
+    /// # Safety
+    ///
+    /// Caller has to ensure that `val` is at most [`SeqNum::MAX`].
+    #[inline]
     pub(crate) const unsafe fn new_unchecked(val: u64) -> Self {
         // SAFETY: User has to ensure that `val <= Self::MAX`
         return Self(unsafe { NonMaxU64::new_unchecked(val) });
@@ -100,7 +109,7 @@ pub trait KvStore: Send + Sync {
     ) -> BoxStream<'a, (Vec<u8>, Vec<u8>)>;
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct InMemoryKvStore {
     inner: Arc<RwLock<BTreeMap<(Vec<u8>, Reverse<SeqNum>), (Vec<u8>, KeyKind)>>>,
 }
@@ -194,5 +203,118 @@ impl KvStore for InMemoryKvStore {
         })
         .flat_map(stream::iter)
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use itertools::Itertools;
+
+    use super::*;
+
+    fn create_seqnum_iter() -> impl Iterator<Item = SeqNum> {
+        (SeqNum::START.get()..=SeqNum::MAX.get())
+            .map(|n| SeqNum::new(n).expect("seqnums should be in valid range"))
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_kv_store() {
+        let kv = InMemoryKvStore::new();
+        let mut next_seqnum = create_seqnum_iter();
+        let politics_key = "politics and economics";
+        let physics_key = "physics";
+        let kv_pairs = [
+            ("maths", "awesome"),
+            (physics_key, "boring"),
+            ("computer science", "incredible"),
+            (politics_key, "exhausting"),
+        ]
+        .into_iter()
+        .sorted_by_key(|(k, _v)| *k)
+        .map(|(k, v)| (k, v, next_seqnum.next().unwrap()))
+        .collect_vec();
+        println!("kv pairs: {:?}", kv_pairs);
+
+        for &(key, value, seqnum) in kv_pairs.iter() {
+            kv.set(key.into(), value.into(), seqnum, KeyKind::Set).await;
+        }
+
+        // -- Scanning --
+        let mut pairs_from_store = kv.scan(
+            Bound::Unbounded,
+            Bound::Unbounded,
+            next_seqnum.next().unwrap(),
+        );
+        let mut i = 0;
+        while let Some((key, value)) = pairs_from_store.next().await {
+            println!("read key: {:?}, value: {:?}", key, value);
+            assert_eq!(&key, kv_pairs[i].0.as_bytes());
+            assert_eq!(&value, kv_pairs[i].1.as_bytes());
+            i += 1;
+        }
+        assert_eq!(i, kv_pairs.len());
+
+        // -- Shadowing: Overwrite an old entry --
+        let new_physics_value = "fascinating";
+        let physics_seqnum = next_seqnum.next().unwrap();
+        kv.set(
+            physics_key.into(),
+            new_physics_value.into(),
+            physics_seqnum,
+            KeyKind::Set,
+        )
+        .await;
+        let phyics_entry = kv.get(physics_key.as_bytes(), physics_seqnum).await;
+        assert_eq!(phyics_entry, Some(new_physics_value.into()));
+
+        // -- Tombstone: Delete an old entry --
+        let politics_seqnum = next_seqnum.next().unwrap();
+        kv.set(
+            politics_key.into(),
+            Vec::new(),
+            politics_seqnum,
+            KeyKind::Delete,
+        )
+        .await;
+        let val = kv.get(politics_key.as_bytes(), SeqNum::MAX).await;
+        assert!(val.is_none(), "just deleted entry");
+        assert_eq!(
+            kv.scan(Bound::Unbounded, Bound::Unbounded, politics_seqnum,)
+                .collect::<Vec<_>>()
+                .await
+                .len(),
+            kv_pairs.len() - 1
+        );
+        for ((start_key, start_value), (kv_key, kv_value)) in kv_pairs
+            .iter()
+            // updated physics
+            .map(|&(k, v, _s)| {
+                if k == physics_key {
+                    (physics_key, new_physics_value)
+                } else {
+                    (k, v)
+                }
+            })
+            // removed politics
+            .filter(|&(k, _v)| k != politics_key)
+            .zip_eq(
+                kv.scan(Bound::Unbounded, Bound::Unbounded, politics_seqnum)
+                    .collect::<Vec<_>>()
+                    .await,
+            )
+        {
+            println!(
+                "start key: {}, kv key: {}",
+                start_key,
+                String::from_utf8_lossy(&kv_key)
+            );
+            assert_eq!(start_key.as_bytes(), &kv_key);
+            println!(
+                "start value: {}, kv value: {}",
+                start_value,
+                String::from_utf8_lossy(&kv_value)
+            );
+            assert_eq!(start_value.as_bytes(), &kv_value);
+        }
     }
 }
