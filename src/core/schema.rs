@@ -1,7 +1,9 @@
-use crate::core::{
+use std::sync::Arc;
+
+use crate::{core::{
     DecodeError, NS, SliceReader, TempestReader, TempestStr, TempestWriter,
     value::{TempestType, TempestValue},
-};
+}, kv::KvStore};
 
 #[derive(Debug)]
 pub(crate) struct ColumnSchema {
@@ -47,8 +49,16 @@ pub(crate) struct DatabaseSchema {
 ///
 /// [`KvStore`]: crate::kv::KvStore
 pub(crate) struct Catalog {
-    //kv: Arc<dyn KvStore>
+    kv: Arc<dyn KvStore>,
     cache: Vec<TableSchema>,
+}
+
+impl Catalog {
+    pub(crate) fn init(kv: Arc<dyn KvStore>) -> Catalog {
+        // TODO: read from and store schema to kv
+        let cache = Vec::new();
+        Self { kv, cache }
+    }
 }
 
 pub(crate) struct TempestRow {
