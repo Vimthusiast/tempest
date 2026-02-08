@@ -66,24 +66,26 @@ pub(crate) mod scheduler;
 /// [`Catalog`]: crate::Catalog
 /// [`ManifestManager`]: crate::manifest::ManifestManager
 /// [`Manifest`]: crate::manifest::Manifest
-pub struct Tempest<MM: ManifestManager> {
-    kv: Arc<dyn KvStore>,
-    manifest_manager: MM,
+pub struct Tempest {
+    kv_store: Arc<dyn KvStore>,
+    manifest_manager: Arc<dyn ManifestManager>,
     access_manager: AccessManager,
     catalog: Catalog,
 }
 
-impl<TManifestManager> Tempest<TManifestManager>
-where
-    TManifestManager: ManifestManager,
-{
+impl Tempest {
     /// Initialize this `Tempest` instance.
-    pub async fn init<KV: KvStore + 'static>(kv: KV, manifest_manager: TManifestManager) -> Self {
-        let kv = Arc::new(kv);
-        let catalog = Catalog::init(kv.clone());
+    pub async fn init<KV, MM>(kv: KV, manifest_manager: MM) -> Self
+    where
+        KV: KvStore + 'static,
+        MM: ManifestManager + 'static,
+    {
+        let kv_store = Arc::new(kv);
+        let manifest_manager = Arc::new(manifest_manager);
+        let catalog = Catalog::init(kv_store.clone());
         let access_manager = AccessManager::init(64).await;
         Self {
-            kv,
+            kv_store,
             manifest_manager,
             catalog,
             access_manager,
