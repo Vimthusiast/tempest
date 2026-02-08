@@ -39,4 +39,10 @@ pub enum TempestError {
     InvalidNamespace { expected: NS, found: NS },
     #[display("Unknown namespace: {}", _0.number)]
     UnknownNamespace(TryFromPrimitiveError<NS>),
+
+    #[display("Invalid sequence number: {}", _0)]
+    InvalidSeqNum(#[error(not(source))] u64),
+
+    #[display("I/O Error: {}", _0)]
+    IoError(std::io::Error),
 }

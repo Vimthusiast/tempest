@@ -100,6 +100,12 @@ pub(crate) trait TempestReader<'a> {
         Ok(decode_i64_sortable(bytes))
     }
 
+    fn read_u64(&mut self) -> Result<u64, DecodeError> {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(self.read_slice(8)?);
+        Ok(u64::from_be_bytes(buf))
+    }
+
     fn read_f64(&mut self) -> Result<f64, DecodeError> {
         let mut bytes = [0u8; 8];
         bytes.copy_from_slice(self.read_slice(8)?);
@@ -270,6 +276,10 @@ pub(crate) trait TempestWriter {
 
     fn write_i64_lexic(&mut self, val: i64) {
         self.write_bytes(&encode_i64_sortable(val));
+    }
+
+    fn write_u64(&mut self, val: u64) {
+        self.write_bytes(&val.to_be_bytes());
     }
 
     fn write_f64(&mut self, val: f64) {

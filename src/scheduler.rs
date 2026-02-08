@@ -265,6 +265,9 @@ impl AccessDispatcher {
     }
 }
 
+/// Manages the access to all of the database objects within Tempest.
+/// The management of these accesses happens through communication with the [`AccessDispatcher`],
+/// which runs in a background tasks and listens for incoming messages through an async channel.
 pub(crate) struct AccessManager {
     tx_to_dispatcher: mpsc::UnboundedSender<DispatcherMessage>,
 }

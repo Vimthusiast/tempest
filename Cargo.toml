@@ -13,5 +13,5 @@ logos = "0.16.1"
 nonmax = "0.5.5"
 num_enum = "0.7.5"
 strum = { version = "0.27.2", features = ["derive"] }
-tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time"] }
+tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time", "fs"] }
 tokyo = "1.0.0"
