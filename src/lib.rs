@@ -75,13 +75,10 @@ pub struct Tempest {
 
 impl Tempest {
     /// Initialize this `Tempest` instance.
-    pub async fn init<KV, MM>(kv: KV, manifest_manager: MM) -> Self
-    where
-        KV: KvStore + 'static,
-        MM: ManifestManager + 'static,
-    {
-        let kv_store = Arc::new(kv);
-        let manifest_manager = Arc::new(manifest_manager);
+    pub async fn init(
+        kv_store: Arc<dyn KvStore>,
+        manifest_manager: Arc<dyn ManifestManager>,
+    ) -> Self {
         let catalog = Catalog::init(kv_store.clone());
         let access_manager = AccessManager::init(64).await;
         Self {

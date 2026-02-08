@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tempest::prelude::*;
 use tokio::fs;
 
@@ -11,5 +13,5 @@ async fn main() {
     let manifest_manager = FileSystemManifestManager::open(data_dir)
         .await
         .expect("could not open manifest manager");
-    let tempest = Tempest::init(kv, manifest_manager).await;
+    let tempest = Tempest::init(Arc::new(kv), Arc::new(manifest_manager)).await;
 }
