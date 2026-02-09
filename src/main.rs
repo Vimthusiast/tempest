@@ -14,4 +14,9 @@ async fn main() {
         .await
         .expect("could not open manifest manager");
     let tempest = Tempest::init(Arc::new(kv), Arc::new(manifest_manager)).await;
+    let conn = tempest
+        .create_db("main".try_into().unwrap())
+        .await
+        .expect("could not create main database");
+    println!("connection: {:#?}", conn);
 }

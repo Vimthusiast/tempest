@@ -2,7 +2,7 @@ use std::str::Utf8Error;
 
 use num_enum::TryFromPrimitiveError;
 
-use crate::core::primitives::NS;
+use crate::core::{TempestStr, primitives::NS};
 
 #[derive(Debug, Display, Error, From)]
 pub enum DecodeError {
@@ -30,6 +30,9 @@ pub enum TempestError {
     DecodeError(DecodeError),
     #[display("Invalid null-byte: Supplied string may not contain any null-bytes (\\0).")]
     InvalidNullByte,
+    #[from(skip)]
+    #[display("Invalid sequence number: {}", _0)]
+    InvalidSeqNum(#[error(not(source))] u64),
 
     // -- Namespace Errors --
     #[display(
@@ -40,9 +43,15 @@ pub enum TempestError {
     #[display("Unknown namespace: {}", _0.number)]
     UnknownNamespace(TryFromPrimitiveError<NS>),
 
-    #[display("Invalid sequence number: {}", _0)]
-    InvalidSeqNum(#[error(not(source))] u64),
-
+    // -- I/O Errors --
     #[display("I/O Error: {}", _0)]
     IoError(std::io::Error),
+
+    // -- Others (TODO) --
+    #[from(skip)]
+    #[display("A database with the name '{}' already exists.", _0)]
+    DatabaseAlreadyExists(#[error(not(source))] TempestStr<'static>),
+    #[from(skip)]
+    #[display("A database with the name '{}' does not exist.", _0)]
+    DatabaseNotFound(#[error(not(source))] TempestStr<'static>),
 }

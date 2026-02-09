@@ -4,12 +4,35 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::core::TempestStr;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AccessMode {
-    IntentShared,
-    IntentExclusive,
-    Shared,
     Exclusive,
+    Shared,
+    IntentExclusive,
+    IntentShared,
+}
+
+impl AccessMode {
+    /// Limit this `AccessMode` by `target`. `IS` is the lowest mode.
+    ///
+    /// **Rules:**
+    ///
+    /// - `X -> target`: Anything is `<= X`.
+    /// - `S -> IS`: `S` can go to `IS` but never `IX`.
+    /// - `IX -> IS`: `IX` can to `IS`.
+    /// - `old -> old`: All others will stay.
+    ///
+    /// This means that any old mode that gets downgraded with target `IS`, always becomes `IS` and
+    /// that `X` can be downgraded to any new target mode, allowing for many downgrade operations.
+    #[inline]
+    const fn downgrade(&self, target: Self) -> Self {
+        match (self, target) {
+            (AccessMode::Exclusive, limit) => limit,
+            (AccessMode::Shared, AccessMode::IntentShared) => AccessMode::IntentShared,
+            (AccessMode::IntentExclusive, AccessMode::IntentShared) => AccessMode::IntentShared,
+            (current, _) => *current,
+        }
+    }
 }
 
 /// ## Resource Hierarchy
@@ -26,25 +49,25 @@ pub(crate) enum Resource {
 
 /// # Lock State
 ///
-/// ## S (Shared)
-///
-/// This object is locked for reading.
-/// Allows other `S`/`IS` locks, but blocks `X`/`IX`.
-///
 /// ## X (Exclusive)
 ///
 /// This object is locked for writing/deletion.
 /// Blocks all `S`/`IS`/`IX` locks.
 ///
-/// ## IS (Intent Shared)
+/// ## S (Shared)
 ///
-/// An object further down the hierarchy is locked for reading.
-/// Blocks `X` locks on the parent.
+/// This object is locked for reading.
+/// Allows other `S`/`IS` locks, but blocks `X`/`IX`.
 ///
 /// ## IX (Intent Exclusive)
 ///
 /// An object further down the hierarchy is locked for writing/deletion.
 /// Blocks `S`/`X` locks on the parent.
+///
+/// ## IS (Intent Shared)
+///
+/// An object further down the hierarchy is locked for reading.
+/// Blocks `X` locks on the parent.
 ///
 /// # Compatability Between Lock States
 ///
@@ -56,40 +79,40 @@ pub(crate) enum Resource {
 /// |        X         | No  | No  | No  | No |
 #[derive(Default)]
 struct LockState {
-    is_locks: u32,
-    ix_locks: u32,
-    s_locks: u32,
     x_locked: bool,
+    s_locks: u32,
+    ix_locks: u32,
+    is_locks: u32,
 }
 
 impl LockState {
     #[inline]
     const fn allows(&self, access_mode: &AccessMode) -> bool {
         match access_mode {
-            AccessMode::IntentShared => !self.x_locked,
-            AccessMode::IntentExclusive => self.s_locks == 0 && !self.x_locked,
-            AccessMode::Shared => self.ix_locks == 0 && !self.x_locked,
             AccessMode::Exclusive => {
                 self.is_locks == 0 && self.ix_locks == 0 && self.s_locks == 0 && !self.x_locked
             }
+            AccessMode::Shared => self.ix_locks == 0 && !self.x_locked,
+            AccessMode::IntentExclusive => self.s_locks == 0 && !self.x_locked,
+            AccessMode::IntentShared => !self.x_locked,
         }
     }
 
     fn acquire(&mut self, access_mode: &AccessMode) {
         match access_mode {
-            AccessMode::IntentShared => self.is_locks += 1,
-            AccessMode::IntentExclusive => self.ix_locks += 1,
-            AccessMode::Shared => self.s_locks += 1,
             AccessMode::Exclusive => self.x_locked = true,
+            AccessMode::Shared => self.s_locks += 1,
+            AccessMode::IntentExclusive => self.ix_locks += 1,
+            AccessMode::IntentShared => self.is_locks += 1,
         }
     }
 
     fn release(&mut self, access_mode: &AccessMode) {
         match access_mode {
-            AccessMode::IntentShared => self.is_locks -= 1,
-            AccessMode::IntentExclusive => self.ix_locks -= 1,
-            AccessMode::Shared => self.s_locks -= 1,
             AccessMode::Exclusive => self.x_locked = false,
+            AccessMode::Shared => self.s_locks -= 1,
+            AccessMode::IntentExclusive => self.ix_locks -= 1,
+            AccessMode::IntentShared => self.is_locks -= 1,
         }
     }
 
@@ -110,12 +133,38 @@ pub(crate) struct PendingRequest {
 pub(crate) enum DispatcherMessage {
     Acquire(PendingRequest),
     Release(ResourceAccessSet),
+    /// Downgrades to a set with lower access modes.
+    /// This set is created through the use of [`AccessMode::downgrade`].
+    Downgrade {
+        old: ResourceAccessSet,
+        new: ResourceAccessSet,
+    },
 }
 
 #[derive(Debug)]
 pub(crate) struct AccessGuard {
     resources: Option<ResourceAccessSet>,
     tx_to_dispatcher: mpsc::UnboundedSender<DispatcherMessage>,
+}
+
+impl AccessGuard {
+    pub(crate) fn downgrade(&mut self, target: AccessMode) {
+        let old = self
+            .resources
+            .take()
+            .expect("Access guard must not have been released yet when downgrading");
+        let new: ResourceAccessSet = old
+            .iter()
+            .map(|(res, mode)| (res.clone(), mode.downgrade(target)))
+            .collect();
+        self.resources = Some(new.clone());
+
+        // WARN: we ignore the error here, cause if send fails, the program
+        // is already in a bad state and expected to come to a crash?
+        let _ = self
+            .tx_to_dispatcher
+            .send(DispatcherMessage::Downgrade { old, new });
+    }
 }
 
 impl Drop for AccessGuard {
@@ -145,6 +194,8 @@ impl From<PendingRequest> for QueuedRequest {
     }
 }
 
+// PERF: Instead of sending the whole `ResourceAccessSet` every time, we should give every
+// `AccessGuard` a unique `usize` ID that we map to their respective access set.
 struct AccessDispatcher {
     resource_accesses: HashMap<Resource, LockState>,
     acquire_queue: VecDeque<QueuedRequest>,
@@ -173,24 +224,48 @@ impl AccessDispatcher {
                 self.try_grant_waiting();
             }
             DispatcherMessage::Release(resources) => {
-                self.release(resources);
+                self.release(&resources);
+                self.try_grant_waiting();
+            }
+            // TODO: verify that `old` is actually a valid lock set and `new` is a subset of `old`
+            // => This should be guranteed already, as we control the whole message passing infra,
+            // but for safety, we should maybe put in some debug_assert! statements
+            DispatcherMessage::Downgrade { old, new } => {
+                self.release(&old);
+                self.acquire(&new);
                 self.try_grant_waiting();
             }
         }
     }
 
     /// Releases a [`ResourceAccessSet`] to make others able acquire it again.
-    fn release(&mut self, resources: ResourceAccessSet) {
+    fn release(&mut self, resources: &ResourceAccessSet) {
         for (resource, access_mode) in resources {
             let lock_state = self
                 .resource_accesses
-                .get_mut(&resource)
+                .get_mut(resource)
                 .expect("resource should have been locked before");
-            lock_state.release(&access_mode);
+            lock_state.release(access_mode);
             // NB: when all locks have been released, we can do 'garbage collection' on this lock
             // => remove the lock from the resource accesses map, to prevent garbage accumulation
             if lock_state.all_released() {
-                self.resource_accesses.remove(&resource);
+                self.resource_accesses.remove(resource);
+            }
+        }
+    }
+
+    /// Acquires a [`ResourceAccessSet`] to make others unable to acquire any conflicting locks.
+    fn acquire(&mut self, resources: &ResourceAccessSet) {
+        for (resource, access_mode) in resources {
+            if let Some(lock_state) = self.resource_accesses.get_mut(resource) {
+                // entry exists, just aquire by reference (cheap, frequent)
+                lock_state.acquire(access_mode);
+            } else {
+                // entry not inserted yet, insert with cloning resource (expensive, rare)
+                self.resource_accesses
+                    .entry(resource.clone())
+                    .or_default()
+                    .acquire(access_mode);
             }
         }
     }
@@ -235,18 +310,7 @@ impl AccessDispatcher {
             }
 
             // lock the requested resources
-            for (resource, access_mode) in &queued.request.resources {
-                if let Some(lock_state) = self.resource_accesses.get_mut(resource) {
-                    // entry exists, just aquire by reference (cheap, frequent)
-                    lock_state.acquire(access_mode);
-                } else {
-                    // entry not inserted yet, insert with cloning resource (expensive, rare)
-                    self.resource_accesses
-                        .entry(resource.clone())
-                        .or_default()
-                        .acquire(access_mode);
-                }
-            }
+            self.acquire(&queued.request.resources);
 
             // send back a guard that will free the resources on drop
             let guard = AccessGuard {
@@ -257,7 +321,7 @@ impl AccessDispatcher {
                 let resources = guard.resources.take().expect(
                     "the resources have not been freed yet, when not leaving the dispatcher",
                 );
-                self.release(resources);
+                self.release(&resources);
                 std::mem::forget(guard);
             }
         }

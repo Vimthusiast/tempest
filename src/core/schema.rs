@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     core::{
-        DecodeError, NS, SliceReader, TempestReader, TempestStr, TempestWriter,
+        DecodeError, NS, SliceReader, TempestError, TempestReader, TempestStr, TempestWriter,
         value::{TempestType, TempestValue},
     },
     kv::KvStore,
@@ -47,20 +47,41 @@ pub(crate) struct DatabaseSchema {
     tables: Vec<TableSchema>,
 }
 
+impl DatabaseSchema {
+    pub(crate) fn new(name: TempestStr<'static>) -> Self {
+        Self {
+            name,
+            tables: Vec::new(),
+        }
+    }
+}
+
 /// Maps database names, to their table schemas.
 /// Persists them in the [`KvStore`] for retrieval (later).
 ///
 /// [`KvStore`]: crate::kv::KvStore
 pub(crate) struct Catalog {
     kv: Arc<dyn KvStore>,
-    cache: Vec<TableSchema>,
+    cache: BTreeMap<TempestStr<'static>, DatabaseSchema>,
 }
 
 impl Catalog {
     pub(crate) fn init(kv: Arc<dyn KvStore>) -> Catalog {
         // TODO: read from and store schema to kv
-        let cache = Vec::new();
+        let cache = BTreeMap::new();
         Self { kv, cache }
+    }
+
+    pub(crate) fn create_db(&mut self, db: TempestStr<'static>) -> Result<(), TempestError> {
+        if self.cache.contains_key(&db) {
+            return Err(TempestError::DatabaseAlreadyExists(db));
+        }
+        self.cache.insert(db.clone(), DatabaseSchema::new(db));
+        Ok(())
+    }
+
+    pub(crate) fn has_db(&self, db: &TempestStr<'_>) -> bool {
+        self.cache.contains_key(&db)
     }
 }
 
