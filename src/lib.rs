@@ -16,7 +16,7 @@ use crate::{
     core::{TempestError, TempestStr, schema::Catalog},
     kv::KvStore,
     manifest::ManifestManager,
-    scheduler::{AccessGuard, AccessManager, AccessMode, Resource},
+    scheduler::{AccessGuard, AccessManager, AccessMode, Resource, ResourceAccessSet},
 };
 
 pub(crate) mod core;
@@ -129,7 +129,7 @@ impl Tempest {
         &self,
         db: TempestStr<'static>,
     ) -> Result<DatabaseConnection, TempestError> {
-        let mut access_guard_set = HashSet::new();
+        let mut access_guard_set = ResourceAccessSet::new();
         access_guard_set.insert((Resource::Database(db.clone()), AccessMode::Exclusive));
         let mut access_guard = self.0.access_manager.acquire(access_guard_set).await;
         self.0.catalog.write().await.create_db(db.clone())?;

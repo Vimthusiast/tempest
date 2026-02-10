@@ -42,6 +42,7 @@ impl AccessMode {
 ///     - `Table(db_name, table_name)`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Resource {
+    // TODO: Do we even have to lock this down?
     Catalog,
     Database(TempestStr<'static>),
     Table(TempestStr<'static>, TempestStr<'static>),
