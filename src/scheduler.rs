@@ -13,7 +13,7 @@ pub(crate) enum AccessMode {
 }
 
 impl AccessMode {
-    /// Limit this `AccessMode` by `target`. `IS` is the lowest mode.
+    /// Limit this `AccessMode` to `target_mode`. `IS` is the lowest mode.
     ///
     /// **Rules:**
     ///
@@ -25,8 +25,8 @@ impl AccessMode {
     /// This means that any old mode that gets downgraded with target `IS`, always becomes `IS` and
     /// that `X` can be downgraded to any new target mode, allowing for many downgrade operations.
     #[inline]
-    const fn downgrade(&self, target: Self) -> Self {
-        match (self, target) {
+    const fn downgrade(&self, target_mode: Self) -> Self {
+        match (self, target_mode) {
             (AccessMode::Exclusive, limit) => limit,
             (AccessMode::Shared, AccessMode::IntentShared) => AccessMode::IntentShared,
             (AccessMode::IntentExclusive, AccessMode::IntentShared) => AccessMode::IntentShared,
@@ -125,6 +125,29 @@ impl LockState {
 
 pub(crate) type ResourceAccessSet = HashSet<(Resource, AccessMode)>;
 
+fn expand_resource_access_set(resources: ResourceAccessSet) -> ResourceAccessSet {
+    let mut expanded_set = resources;
+    let mut parents = Vec::new();
+    for (res, mode) in &expanded_set {
+        let parent_mode = match mode {
+            AccessMode::Shared | AccessMode::IntentShared => AccessMode::IntentShared,
+            AccessMode::Exclusive | AccessMode::IntentExclusive => AccessMode::IntentExclusive,
+        };
+        match res {
+            Resource::Catalog => {} // root of the tree
+            Resource::Database(_) => {
+                parents.push((Resource::Catalog, parent_mode));
+            }
+            Resource::Table(db, _) => {
+                parents.push((Resource::Database(db.clone()), parent_mode.clone()));
+                parents.push((Resource::Catalog, parent_mode));
+            }
+        }
+    }
+    expanded_set.extend(parents);
+    expanded_set
+}
+
 pub(crate) struct PendingRequest {
     resources: ResourceAccessSet,
     grant_tx: oneshot::Sender<AccessGuard>,
@@ -132,63 +155,79 @@ pub(crate) struct PendingRequest {
 
 pub(crate) enum DispatcherMessage {
     Acquire(PendingRequest),
-    Release(ResourceAccessSet),
+    Release(usize),
     /// Downgrades to a set with lower access modes.
     /// This set is created through the use of [`AccessMode::downgrade`].
     Downgrade {
-        old: ResourceAccessSet,
-        new: ResourceAccessSet,
+        guard_id: usize,
+        target_mode: AccessMode,
     },
 }
 
 #[derive(Debug)]
 pub(crate) struct AccessGuard {
-    resources: Option<ResourceAccessSet>,
+    id: usize,
+    is_released: bool,
     tx_to_dispatcher: mpsc::UnboundedSender<DispatcherMessage>,
 }
 
 impl AccessGuard {
-    pub(crate) fn downgrade(&mut self, target: AccessMode) {
-        let old = self
-            .resources
-            .take()
-            .expect("Access guard must not have been released yet when downgrading");
-        let new: ResourceAccessSet = old
-            .iter()
-            .map(|(res, mode)| (res.clone(), mode.downgrade(target)))
-            .collect();
-        self.resources = Some(new.clone());
+    pub(crate) fn downgrade(&mut self, target_mode: AccessMode) {
+        if self.is_released {
+            eprintln!(
+                "Could not downgrade access guard {}: Already released",
+                self.id
+            );
+            return;
+        }
 
-        // WARN: we ignore the error here, cause if send fails, the program
-        // is already in a bad state and expected to come to a crash?
-        let _ = self
-            .tx_to_dispatcher
-            .send(DispatcherMessage::Downgrade { old, new });
+        if let Err(_) = self.tx_to_dispatcher.send(DispatcherMessage::Downgrade {
+            guard_id: self.id,
+            target_mode,
+        }) {
+            eprintln!(
+                "Could not downgrade access guard {}: Dispatcher closed.",
+                self.id
+            );
+        }
     }
 }
 
 impl Drop for AccessGuard {
     fn drop(&mut self) {
+        // prevent double free
+        if self.is_released {
+            return;
+        }
+        // NB: technically, we do not need to set this, as the
+        // value has been dropped, but for clarity we still do
+        self.is_released = true;
+
         // signal to the dispatcher that the resources can be accessed again
-        if let Some(resources) = self.resources.take() {
-            // WARN: we ignore the error here, cause if send fails, the program
-            // is already in a bad state and expected to come to a crash?
-            let _ = self
-                .tx_to_dispatcher
-                .send(DispatcherMessage::Release(resources));
+        if let Err(_) = self
+            .tx_to_dispatcher
+            .send(DispatcherMessage::Release(self.id))
+        {
+            eprintln!(
+                "Could not release access guard {}: Dispatcher closed.",
+                self.id
+            );
         }
     }
 }
 
 struct QueuedRequest {
     request: PendingRequest,
+    expanded_resources: ResourceAccessSet,
     skip_count: u32,
 }
 
 impl From<PendingRequest> for QueuedRequest {
     fn from(request: PendingRequest) -> Self {
+        let expanded_resources = expand_resource_access_set(request.resources.clone());
         Self {
             request,
+            expanded_resources,
             skip_count: 0,
         }
     }
@@ -205,6 +244,13 @@ struct AccessDispatcher {
     rx: mpsc::UnboundedReceiver<DispatcherMessage>,
     /// The maximum amount of times a [`QueuedRequest`] may be skipped over.
     max_skip_tolerance: u32,
+    /// The unique ID that will be used for the next [`AccessGuard`] that receives a permit.
+    next_guard_id: usize,
+    /// Every [`AccessGuard`] will receive it's own unique ID that is used to reference it's
+    /// allocated [`Resource`]s globally, which is tracked within this map:
+    ///
+    /// `guard_id: usize` -> `(requested: ResourceAccessSet, computed: ResourceAccessSet)`
+    alive_guards: HashMap<usize, (ResourceAccessSet, ResourceAccessSet)>,
 }
 
 impl AccessDispatcher {
@@ -217,22 +263,61 @@ impl AccessDispatcher {
         }
     }
 
+    fn get_guard_id(&mut self) -> usize {
+        let id = self.next_guard_id;
+        self.next_guard_id += 1;
+        id
+    }
+
     fn handle_message(&mut self, message: DispatcherMessage) {
         match message {
             DispatcherMessage::Acquire(request) => {
                 self.acquire_queue.push_back(request.into());
                 self.try_grant_waiting();
             }
-            DispatcherMessage::Release(resources) => {
-                self.release(&resources);
+            DispatcherMessage::Release(guard_id) => {
+                let Some((_requested_resources, expanded_resources)) =
+                    self.alive_guards.remove(&guard_id)
+                else {
+                    eprintln!(
+                        "Could not downgrade access guard {}: Guard not found.",
+                        guard_id
+                    );
+                    return;
+                };
+                self.release(&expanded_resources);
                 self.try_grant_waiting();
             }
             // TODO: verify that `old` is actually a valid lock set and `new` is a subset of `old`
             // => This should be guranteed already, as we control the whole message passing infra,
             // but for safety, we should maybe put in some debug_assert! statements
-            DispatcherMessage::Downgrade { old, new } => {
-                self.release(&old);
-                self.acquire(&new);
+            DispatcherMessage::Downgrade {
+                guard_id,
+                target_mode,
+            } => {
+                let Some((requested_resources, expanded_resources)) =
+                    self.alive_guards.remove(&guard_id)
+                else {
+                    eprintln!(
+                        "Could not downgrade access guard {}: Guard not found.",
+                        guard_id
+                    );
+                    return;
+                };
+                self.release(&expanded_resources);
+                let new_requested_resources: ResourceAccessSet = requested_resources
+                    .into_iter()
+                    .map(|(res, mode)| (res, mode.downgrade(target_mode)))
+                    .collect();
+                let new_expanded_resources =
+                    expand_resource_access_set(new_requested_resources.clone());
+                self.acquire(&new_expanded_resources);
+
+                // TODO: write test that catches if this step is missing,
+                // e.g. by trying to release an access guard after downgrading
+                self.alive_guards
+                    .insert(guard_id, (new_requested_resources, new_expanded_resources));
+
                 self.try_grant_waiting();
             }
         }
@@ -287,7 +372,7 @@ impl AccessDispatcher {
 
             // check if all resources can be locked
             let mut all_allowed = true;
-            for (resource, access_mode) in queued.request.resources.iter() {
+            for (resource, access_mode) in queued.expanded_resources.iter() {
                 if let Some(lock_state) = self.resource_accesses.get(resource)
                     && !lock_state.allows(access_mode)
                 {
@@ -309,20 +394,24 @@ impl AccessDispatcher {
                 continue;
             }
 
-            // lock the requested resources
-            self.acquire(&queued.request.resources);
+            // get a unique guard ID
+            let guard_id = self.get_guard_id();
 
             // send back a guard that will free the resources on drop
             let guard = AccessGuard {
-                resources: Some(queued.request.resources),
+                id: guard_id,
+                is_released: false,
                 tx_to_dispatcher: self.tx.clone(),
             };
             if let Err(mut guard) = queued.request.grant_tx.send(guard) {
-                let resources = guard.resources.take().expect(
-                    "the resources have not been freed yet, when not leaving the dispatcher",
+                guard.is_released = true;
+            } else {
+                // only lock the resources when the grant tx transmits permits successfully
+                self.acquire(&queued.expanded_resources);
+                self.alive_guards.insert(
+                    guard_id,
+                    (queued.request.resources, queued.expanded_resources),
                 );
-                self.release(&resources);
-                std::mem::forget(guard);
             }
         }
         self.acquire_queue = still_waiting;
@@ -347,6 +436,8 @@ impl AccessManager {
             rx: rx_to_dispatcher,
             tx: tx_to_dispatcher_clone,
             max_skip_tolerance,
+            next_guard_id: 0,
+            alive_guards: HashMap::new(),
         };
         let _dispatcher_handle = tokio::task::spawn(async move {
             access_dispatcher.run().await;
@@ -358,28 +449,8 @@ impl AccessManager {
     pub(crate) async fn acquire(&self, resources: ResourceAccessSet) -> AccessGuard {
         let (tx, rx) = oneshot::channel();
 
-        let mut expanded_set = resources;
-        let mut parents = Vec::new();
-        for (res, mode) in &expanded_set {
-            let parent_mode = match mode {
-                AccessMode::Shared | AccessMode::IntentShared => AccessMode::IntentShared,
-                AccessMode::Exclusive | AccessMode::IntentExclusive => AccessMode::IntentExclusive,
-            };
-            match res {
-                Resource::Catalog => {} // root of the tree
-                Resource::Database(_) => {
-                    parents.push((Resource::Catalog, parent_mode));
-                }
-                Resource::Table(db, _) => {
-                    parents.push((Resource::Database(db.clone()), parent_mode.clone()));
-                    parents.push((Resource::Catalog, parent_mode));
-                }
-            }
-        }
-        expanded_set.extend(parents);
-
         let request = PendingRequest {
-            resources: expanded_set,
+            resources,
             grant_tx: tx,
         };
 
@@ -435,7 +506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_access_manager() {
+    async fn test_access_manager_acquire_release() {
         let max_skip_tolerance = 64;
         let manager = AccessManager::init(max_skip_tolerance).await;
         let db = "main";
@@ -451,6 +522,7 @@ mod tests {
         tokio::pin!(exclusive_future);
 
         // Give the dispatcher a tiny window to put the X-Lock in the queue
+        tokio::task::yield_now().await;
         let sync_check =
             tokio::time::timeout(Duration::from_millis(5), &mut exclusive_future).await;
         assert!(
@@ -470,17 +542,76 @@ mod tests {
         assert_eq!(granted_shared.len(), max_skip_tolerance as usize - 1);
 
         // 4. Request Shared lock one more time; should time out
-        let res = tokio::time::timeout(Duration::from_millis(20), manager.acquire(resources)).await;
+        tokio::task::yield_now().await;
+        let res = tokio::time::timeout(Duration::from_millis(10), manager.acquire(resources)).await;
         assert!(
             res.is_err(),
             "Barrier should have prevented jump-ahead over 2. lock (X)"
         );
 
-        // 5. Drop 1. Shared lock, to allow for 2. Exclusive lock to be aquired
+        // Check again that X-lock is still not granted yet
+        tokio::task::yield_now().await;
+        let res = tokio::time::timeout(Duration::from_millis(10), &mut exclusive_future).await;
+        assert!(
+            res.is_err(),
+            "X-lock should not have been acquired yet, until all other guards are released"
+        );
+
+        // 5. Drop S-lock from 1.
         drop(shared_guard);
+
+        // Check again that X-lock is still not granted yet
+        tokio::task::yield_now().await;
+        let res = tokio::time::timeout(Duration::from_millis(10), &mut exclusive_future).await;
+        assert!(
+            res.is_err(),
+            "X-lock should not have been acquired yet, until all other guards are released"
+        );
+
+        // 6. Drop S-locks from 3.
         drop(granted_shared);
         let _exclusive_guard = tokio::time::timeout(Duration::from_millis(20), exclusive_future)
             .await
             .expect("after dropping 1. S-lock, the 2. X-lock should be acquired successfully");
+    }
+
+    #[tokio::test]
+    async fn test_access_manager_downgrade_guard() {
+        let max_skip_tolerance = 64;
+        let manager = AccessManager::init(max_skip_tolerance).await;
+        let db = "main";
+        let table = "users";
+
+        let table_res = resource_set![Table(db, table) => Exclusive];
+        let shared_res = resource_set![Table(db, table) => Shared];
+
+        // 1. Acquire X-Lock on a Table
+        let mut x_guard = manager.acquire(table_res).await;
+
+        // 2. Verify a second S-Lock request blocks
+        let s_future = manager.acquire(shared_res);
+        tokio::pin!(s_future);
+
+        tokio::task::yield_now().await;
+        let sync_check = tokio::time::timeout(Duration::from_millis(10), &mut s_future).await;
+        assert!(
+            sync_check.is_err(),
+            "The S-Lock should be blocked by the X-Lock"
+        );
+
+        // 3. Downgrade X-Lock to S-Lock
+        // This should trigger try_grant_waiting inside the dispatcher
+        x_guard.downgrade(AccessMode::Shared);
+
+        // 4. Verify the second S-Lock is now granted
+        // The downgrade makes the resource compatible, so the blocked future should resolve
+        tokio::task::yield_now().await;
+        let s_guard = tokio::time::timeout(Duration::from_millis(10), s_future)
+            .await
+            .expect("S-Lock should be granted immediately after X-Lock is downgraded to S");
+
+        // 5. Cleanup
+        drop(x_guard);
+        drop(s_guard);
     }
 }
