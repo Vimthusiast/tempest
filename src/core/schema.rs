@@ -5,8 +5,7 @@ use std::{
 
 use crate::{
     core::{
-        DecodeError, NS, SliceReader, TempestError, TempestReader, TempestStr, TempestWriter,
-        value::{TempestType, TempestValue},
+        DecodeError, NS, SliceReader, TempestError, TempestKey, TempestReader, TempestStr, TempestWriter, value::{TempestType, TempestValue}
     },
     kv::KvStore,
 };
@@ -159,7 +158,7 @@ impl Catalog {
         }
         db_schema
             .tables
-            .insert(table.clone(), TableSchema::new_empty(table));
+            .insert(table.clone(), schema);
         Ok(())
     }
 
@@ -227,7 +226,7 @@ pub(crate) struct RowDecoder<'a> {
 impl<'a> RowDecoder<'a> {
     pub(crate) fn new(db: &'a TempestStr<'a>, schema: &'a TableSchema) -> Self {
         let value_indices = schema.value_indices();
-        let key_prefix_len = 3 + db.len() + schema.name.len();
+        let key_prefix_len = TempestKey::prefix_size(db.len(), schema.name.len());
         Self {
             schema,
             db,
@@ -289,21 +288,10 @@ mod tests {
     #[test]
     fn test_row_encoder_decoder() {
         let db = TempestStr::try_from("db1").unwrap();
-        let schema = TableSchema {
-            name: "table1".try_into().unwrap(),
-            columns: vec![
-                ColumnSchema {
-                    name: "int8_col".try_into().unwrap(),
-                    col_type: TempestType::Int8,
-                },
-                ColumnSchema {
-                    name: "bool_col".try_into().unwrap(),
-                    col_type: TempestType::Bool,
-                },
-            ],
-            // primary key (int8_col)
-            primary_key: vec![0],
-        };
+        let schema = schema!(Table("table1") {
+            int8_col: Int8,
+            bool_col: Bool,
+        }, pk(int8_col));
         let row_encoder = RowEncoder::new(&db, &schema);
         println!("initialized row encoder: {:?}", row_encoder);
         let row_decoder = RowDecoder::new(&db, &schema);

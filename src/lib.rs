@@ -3,11 +3,12 @@ use std::{collections::HashSet, sync::Arc};
 #[macro_use]
 extern crate derive_more;
 
+use itertools::Itertools;
 use tokio::sync::RwLock;
 
 use crate::{
     core::{
-        TempestError, TempestStr,
+        TempestError, TempestKey, TempestStr,
         schema::{Catalog, TableSchema},
     },
     kv::KvStore,
@@ -32,17 +33,36 @@ pub(crate) struct TempestEngine {
 
 #[derive(Debug)]
 pub struct TableContext {
-    /// Shows, if this context has exclusive table access, so it can perform write actions.
-    exclusive: bool,
     /// The access guard that keeps the permit for this context.
     access_guard: AccessGuard,
+    /// Shows, if this context has exclusive table access, so it can perform write actions.
+    exclusive: bool,
     /// The name of the database this context belongs to.
     db: TempestStr<'static>,
     /// The name of the table this context belongs to.
     table: TempestStr<'static>,
+    /// The computed prefix of keys for this table.
+    #[debug("[{}]", key_prefix.iter().map(|b| format!("{:02X}", b)).join(" "))]
+    key_prefix: Vec<u8>,
 }
 
 impl TableContext {
+    pub(crate) fn new(
+        access_guard: AccessGuard,
+        exclusive: bool,
+        db: TempestStr<'static>,
+        table: TempestStr<'static>,
+    ) -> Self {
+        let mut key_prefix = Vec::new();
+        TempestKey::encode_prefix(&mut key_prefix, &db, &table);
+        Self {
+            access_guard,
+            exclusive,
+            db,
+            table,
+            key_prefix,
+        }
+    }
     // TODO: CRUD
 }
 
@@ -79,12 +99,12 @@ impl DatabaseContext {
             .await
             .has_table(&self.db, &table)
         {
-            Ok(TableContext {
-                exclusive,
+            Ok(TableContext::new(
                 access_guard,
-                db: self.db.clone(),
+                exclusive,
+                self.db.clone(),
                 table,
-            })
+            ))
         } else {
             Err(TempestError::TableNotFound(self.db.clone(), table))
         }
@@ -111,12 +131,12 @@ impl DatabaseContext {
             access_guard.downgrade(AccessMode::Shared);
         }
 
-        Ok(TableContext {
-            exclusive,
+        Ok(TableContext::new(
             access_guard,
-            db: self.db.clone(),
+            exclusive,
+            self.db.clone(),
             table,
-        })
+        ))
     }
 }
 

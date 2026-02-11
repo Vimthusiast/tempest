@@ -81,14 +81,14 @@ impl TempestKey<'_> {
 
     pub(crate) fn encode_prefix<W: TempestWriter>(
         writer: &mut W,
-        db: TempestStr<'_>,
-        table: TempestStr<'_>,
+        db: &TempestStr<'_>,
+        table: &TempestStr<'_>,
     ) {
         let prefix_size = Self::prefix_size(db.len(), table.len());
         writer.reserve(prefix_size);
         writer.write_u8(NS::DATA.into());
-        writer.write_string_null_terminated(&db);
-        writer.write_string_null_terminated(&table);
+        writer.write_string_null_terminated(db);
+        writer.write_string_null_terminated(table);
     }
 
     pub(crate) fn new_borrowed<'a>(
