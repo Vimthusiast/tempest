@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use crate::{
     core::{
@@ -33,6 +36,14 @@ pub(crate) struct TableSchema {
 }
 
 impl TableSchema {
+    pub(crate) fn new(name: TempestStr<'static>) -> Self {
+        Self {
+            name,
+            columns: Vec::new(),
+            primary_key: Vec::new(),
+        }
+    }
+
     pub(crate) fn value_indices(&self) -> Vec<usize> {
         (0..self.columns.len())
             .filter(|idx| !self.primary_key.contains(idx))
@@ -44,14 +55,14 @@ impl TableSchema {
 pub(crate) struct DatabaseSchema {
     /// Name of this database. May not contain `\0`.
     name: TempestStr<'static>,
-    tables: Vec<TableSchema>,
+    tables: HashMap<TempestStr<'static>, TableSchema>,
 }
 
 impl DatabaseSchema {
     pub(crate) fn new(name: TempestStr<'static>) -> Self {
         Self {
             name,
-            tables: Vec::new(),
+            tables: HashMap::new(),
         }
     }
 }
@@ -82,6 +93,30 @@ impl Catalog {
 
     pub(crate) fn has_db(&self, db: &TempestStr<'_>) -> bool {
         self.cache.contains_key(&db)
+    }
+
+    pub(crate) fn create_table(
+        &mut self,
+        db: TempestStr<'static>,
+        table: TempestStr<'static>,
+    ) -> Result<(), TempestError> {
+        let Some(db_schema) = self.cache.get_mut(&db) else {
+            return Err(TempestError::DatabaseNotFound(db));
+        };
+        if db_schema.tables.contains_key(&table) {
+            return Err(TempestError::TableAlreadyExists(db, table));
+        }
+        db_schema
+            .tables
+            .insert(table.clone(), TableSchema::new(table));
+        Ok(())
+    }
+
+    pub(crate) fn has_table(&self, db: &TempestStr<'static>, table: &TempestStr<'static>) -> bool {
+        self.cache
+            .get(db)
+            .map(|db_schema| db_schema.tables.contains_key(table))
+            .unwrap_or_default()
     }
 }
 

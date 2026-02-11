@@ -169,6 +169,7 @@ pub(crate) enum DispatcherMessage {
 pub(crate) struct AccessGuard {
     id: usize,
     is_released: bool,
+    #[debug(skip)]
     tx_to_dispatcher: mpsc::UnboundedSender<DispatcherMessage>,
 }
 

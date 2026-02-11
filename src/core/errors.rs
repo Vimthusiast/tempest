@@ -54,4 +54,18 @@ pub enum TempestError {
     #[from(skip)]
     #[display("A database with the name '{}' does not exist.", _0)]
     DatabaseNotFound(#[error(not(source))] TempestStr<'static>),
+    /// `(database, table)`
+    #[from(skip)]
+    #[display("A table with the name '{}' already exists in database '{}'.", _1, _0)]
+    TableAlreadyExists(
+        #[error(not(source))] TempestStr<'static>,
+        #[error(not(source))] TempestStr<'static>,
+    ),
+    /// `(database, table)`
+    #[from(skip)]
+    #[display("A table with the name '{}' does not exist in database {}.", _1, _0)]
+    TableNotFound(
+        #[error(not(source))] TempestStr<'static>,
+        #[error(not(source))] TempestStr<'static>,
+    ),
 }
