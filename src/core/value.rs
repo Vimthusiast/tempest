@@ -5,7 +5,7 @@ use crate::core::{DecodeError, TempestReader, TempestWriter};
 #[derive(Debug, Clone, PartialEq, EnumDiscriminants)]
 #[strum_discriminants(name(TempestType))]
 #[repr(u8)]
-pub(crate) enum TempestValue {
+pub enum TempestValue {
     Bool(bool) = 0,
     Int8(i64) = 1,
 }

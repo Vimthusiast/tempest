@@ -12,15 +12,25 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub(crate) struct ColumnSchema {
+pub struct ColumnSchema {
     /// Name of this column. May not contain `\0`.
     name: TempestStr<'static>,
     // value type
     col_type: TempestType,
 }
 
+impl ColumnSchema {
+    pub fn new(name: TempestStr<'static>, col_type: TempestType) -> Self {
+        Self { name, col_type }
+    }
+
+    pub fn name(&self) -> &TempestStr<'static> {
+        &self.name
+    }
+}
+
 #[derive(Debug)]
-pub(crate) struct TableSchema {
+pub struct TableSchema {
     /// Name of this table. May not contain `\0`.
     name: TempestStr<'static>,
     columns: Vec<ColumnSchema>,
@@ -36,11 +46,23 @@ pub(crate) struct TableSchema {
 }
 
 impl TableSchema {
-    pub(crate) fn new(name: TempestStr<'static>) -> Self {
+    pub fn new_empty(name: TempestStr<'static>) -> Self {
         Self {
             name,
             columns: Vec::new(),
             primary_key: Vec::new(),
+        }
+    }
+
+    pub fn new(
+        name: TempestStr<'static>,
+        columns: Vec<ColumnSchema>,
+        primary_key: Vec<usize>,
+    ) -> Self {
+        Self {
+            name,
+            columns,
+            primary_key,
         }
     }
 
@@ -49,6 +71,34 @@ impl TableSchema {
             .filter(|idx| !self.primary_key.contains(idx))
             .collect()
     }
+}
+
+#[macro_export]
+macro_rules! schema {
+    (Table($name:expr) { $($col:ident : $typ:ident),* $(,)? }$(, pk($($pk_col:ident),*) )? $(,)?) => {{
+        let table_name: TempestStr<'static> = $name.try_into().unwrap();
+        let mut columns = Vec::new();
+        $(
+            let col_name = stringify!($col).try_into().unwrap();
+            let col_type = TempestType::$typ;
+            let col_schema = ColumnSchema::new(col_name, col_type);
+            columns.push(col_schema);
+        )*
+        let mut primary_key = Vec::new();
+        $(
+            $(
+                let pk_col_name: TempestStr<'static> = stringify!($pk_col).try_into().unwrap();
+                primary_key.push(
+                    columns
+                    .iter()
+                    .position(|col| col.name() == &pk_col_name)
+                    .expect(&format!("unknown column {}", stringify!($pk_col)))
+                );
+            )*
+        )?
+
+        TableSchema::new(table_name, columns, primary_key)
+    }};
 }
 
 #[derive(Debug)]
@@ -99,6 +149,7 @@ impl Catalog {
         &mut self,
         db: TempestStr<'static>,
         table: TempestStr<'static>,
+        schema: TableSchema,
     ) -> Result<(), TempestError> {
         let Some(db_schema) = self.cache.get_mut(&db) else {
             return Err(TempestError::DatabaseNotFound(db));
@@ -108,7 +159,7 @@ impl Catalog {
         }
         db_schema
             .tables
-            .insert(table.clone(), TableSchema::new(table));
+            .insert(table.clone(), TableSchema::new_empty(table));
         Ok(())
     }
 

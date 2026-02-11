@@ -6,7 +6,10 @@ extern crate derive_more;
 use tokio::sync::RwLock;
 
 use crate::{
-    core::{TempestError, TempestStr, schema::Catalog},
+    core::{
+        TempestError, TempestStr,
+        schema::{Catalog, TableSchema},
+    },
     kv::KvStore,
     manifest::ManifestManager,
     scheduler::{AccessGuard, AccessManager, AccessMode, Resource, ResourceAccessSet},
@@ -87,6 +90,7 @@ impl DatabaseContext {
         &self,
         table: TempestStr<'static>,
         exclusive: bool,
+        schema: TableSchema,
     ) -> Result<TableContext, TempestError> {
         let mut resources = ResourceAccessSet::new();
         resources.insert((
@@ -94,12 +98,11 @@ impl DatabaseContext {
             AccessMode::Exclusive,
         ));
         let mut access_guard = self.instance.0.access_manager.acquire(resources).await;
-        self.instance
-            .0
-            .catalog
-            .write()
-            .await
-            .create_table(self.db.clone(), table.clone())?;
+        self.instance.0.catalog.write().await.create_table(
+            self.db.clone(),
+            table.clone(),
+            schema,
+        )?;
         if !exclusive {
             access_guard.downgrade(AccessMode::Shared);
         }
@@ -223,8 +226,9 @@ mod tests {
         let manifest_manager = InMemoryManifestManager::new();
         let tempest = Tempest::init(Arc::new(kv_store), Arc::new(manifest_manager)).await;
         let db1_ctx = tempest.create_db("db1".try_into().unwrap()).await.unwrap();
+        let table1_schema = TableSchema::new_empty("table1".try_into().unwrap());
         let table1_ctx = db1_ctx
-            .create_table("table1".try_into().unwrap(), false)
+            .create_table("table1".try_into().unwrap(), false, table1_schema)
             .await
             .unwrap();
         drop(db1_ctx);

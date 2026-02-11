@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tempest::prelude::*;
+use tempest::{prelude::*, schema};
 use tokio::fs;
 
 #[tokio::main]
@@ -21,8 +21,13 @@ async fn main() {
     println!("database main: {:#?}", db_ctx);
     // insert some data in this scope
     {
+        let users_schema = schema!(Table("users") {
+            id: Int8,
+            alive: Bool,
+        }, pk(id));
+        println!("schema for users: {:#?}", users_schema);
         let users_ctx = db_ctx
-            .create_table("users".try_into().unwrap(), true)
+            .create_table("users".try_into().unwrap(), true, users_schema)
             .await
             .expect("could not create users table");
         println!("table users: {:#?}", users_ctx);
