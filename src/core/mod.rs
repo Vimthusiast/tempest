@@ -1,12 +1,12 @@
-pub(crate) mod encoding;
-pub(crate) mod errors;
-pub(crate) mod io;
-pub(crate) mod key;
-pub(crate) mod primitives;
-pub(crate) mod schema;
-pub(crate) mod value;
+pub mod encoding;
+pub mod errors;
+pub mod io;
+pub mod key;
+pub mod primitives;
+pub mod schema;
+pub mod value;
 
-pub(crate) use errors::{DecodeError, TempestError};
+pub use errors::{DecodeError, TempestError};
 pub(crate) use io::{SliceReader, TempestReader, TempestWriter};
 pub(crate) use key::{TempestKey, prefix_range, successor};
 

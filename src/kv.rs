@@ -7,7 +7,9 @@ use futures::{
 };
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
-use tokio::sync::RwLock;
+use tokio::sync::{OwnedRwLockReadGuard, RwLock};
+
+use crate::core::TempestError;
 
 #[derive(Debug, Display, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SeqNum(NonMaxU64);
@@ -101,12 +103,142 @@ impl KeyTrailer {
 pub trait KvStore: Send + Sync {
     async fn get(&self, key: &[u8], seq: SeqNum) -> Option<Vec<u8>>;
     async fn set(&self, key: Vec<u8>, value: Vec<u8>, seq: SeqNum, kind: KeyKind);
-    fn scan<'a>(
-        &self,
-        start: Bound<&'a [u8]>,
-        end: Bound<&'a [u8]>,
-        seq: SeqNum,
-    ) -> BoxStream<'a, (Vec<u8>, Vec<u8>)>;
+    fn cursor_at_prefix(&self, prefix: Vec<u8>, seq: SeqNum) -> Box<dyn KvCursor>;
+}
+
+#[async_trait]
+pub trait KvCursor: Send {
+    /// Seeks to a specific key (or the first key greater than it).
+    async fn seek(&mut self, key: &[u8]) -> Result<(), TempestError>;
+
+    /// Moves to the next key-value pair and returns it.
+    async fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, TempestError>;
+
+    /// Returns the current Key and Value.
+    /// Returns `None` if the cursor is out of bounds or at EOF.
+    fn current(&self) -> Option<(&[u8], &[u8])>;
+
+    /// Check if the cursor is still valid.
+    fn is_valid(&self) -> bool;
+
+    /// Consumes the cursor and returns a Stream of Key-Value pairs.
+    fn into_stream(self: Box<Self>) -> BoxStream<'static, (Vec<u8>, Vec<u8>)>
+    where
+        Self: 'static,
+    {
+        stream::unfold(self, |mut cursor| async move {
+            match cursor.next().await {
+                Ok(Some(pair)) => Some((pair, cursor)),
+                _ => None,
+            }
+        })
+        .boxed()
+    }
+}
+
+/// The internal state of our Cursor.
+/// We store the owned guard so the BTreeMap isn't dropped or mutated under us.
+pub struct VersionedKvCursor {
+    /// The captured read lock.
+    guard: OwnedRwLockReadGuard<BTreeMap<(Vec<u8>, Reverse<SeqNum>), (Vec<u8>, KeyKind)>>,
+    /// The visible sequence number for this cursor.
+    seq: SeqNum,
+    /// The inclusive lower bound for the scan.
+    prefix: Vec<u8>,
+    /// The current position in the BTreeMap.
+    /// We use a raw key here to re-establish the range iterator if needed,
+    /// but for simplicity, we'll hold the iterator directly.
+    current_key: Option<Vec<u8>>,
+    current_value: Option<Vec<u8>>,
+    /// Whether the cursor is finished.
+    is_done: bool,
+}
+
+#[async_trait]
+impl KvCursor for VersionedKvCursor {
+    async fn seek(&mut self, key: &[u8]) -> Result<(), TempestError> {
+        self.is_done = false;
+        // Logic: Jump to the key, then call next() to handle versioning
+        self.current_key = Some(key.to_vec());
+        Ok(())
+    }
+
+    async fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, TempestError> {
+        if self.is_done {
+            return Ok(None);
+        }
+
+        // We need to find the next logical key that is <= self.seq
+        // If we have a current_key, we start searching from there + 1.
+        let range_start = if let Some(ref k) = self.current_key {
+            // If we just started or seeked, we want to include this key
+            // but jump to the specific version.
+            Bound::Included((k.clone(), Reverse(self.seq)))
+        } else {
+            Bound::Included((self.prefix.clone(), Reverse(self.seq)))
+        };
+
+        // We iterate until we find a key that:
+        // 1. Matches the prefix
+        // 2. Is different from the current_key (if we've already returned one)
+        // 3. Is not a Delete tombstone
+
+        let mut iter = self.guard.range((range_start, Bound::Unbounded));
+
+        while let Some(((found_key, Reverse(found_seq)), (found_val, kind))) = iter.next() {
+            // 1. Prefix check
+            if !found_key.starts_with(&self.prefix) {
+                break;
+            }
+
+            // 2. Skip versions from the future
+            if *found_seq > self.seq {
+                continue;
+            }
+
+            // 3. Handle key transitions
+            if let Some(ref k) = self.current_key {
+                // If we are looking at the same user-key but a different version, skip.
+                // Because of Reverse(SeqNum), the first one we see is the newest.
+                if found_key == k {
+                    continue;
+                }
+            }
+
+            // 4. We found the newest visible version of a NEW key
+            self.current_key = Some(found_key.clone());
+
+            match kind {
+                KeyKind::Set => {
+                    let res = (found_key.clone(), found_val.clone());
+                    self.current_value = Some(found_val.clone());
+                    return Ok(Some(res));
+                }
+                KeyKind::Delete => {
+                    // It's a tombstone. We mark it as the current_key so we don't
+                    // look at older versions of it, then keep looping for the next logical key.
+                    self.current_value = None;
+                    continue;
+                }
+            }
+        }
+
+        self.is_done = true;
+        self.current_key = None;
+        self.current_value = None;
+        Ok(None)
+    }
+
+    fn current(&self) -> Option<(&[u8], &[u8])> {
+        match (&self.current_key, &self.current_value) {
+            (Some(k), Some(v)) => Some((k.as_slice(), v.as_slice())),
+            _ => None,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.is_done && self.current_key.is_some()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -148,61 +280,26 @@ impl KvStore for InMemoryKvStore {
             .insert((key, Reverse(seq)), (value, kind));
     }
 
-    fn scan<'a>(
-        &self,
-        start: Bound<&'a [u8]>,
-        end: Bound<&'a [u8]>,
-        seq: SeqNum,
-    ) -> BoxStream<'a, (Vec<u8>, Vec<u8>)> {
-        let inner_clone = self.inner.clone();
+    fn cursor_at_prefix(&self, prefix: Vec<u8>, seq: SeqNum) -> Box<dyn KvCursor> {
+        // We use try_read_owned or we must handle the async nature.
+        // Since cursor_at_prefix is sync in the signature, we assume the lock is available
+        // or we block_on. Better yet, we make the store return the guard.
 
-        stream::once(async move {
-            let read_guard = inner_clone.read_owned().await;
-            let mut results = Vec::new();
-            let mut current_key: Option<(Vec<u8>, SeqNum)> = None;
+        // For the sake of the signature provided:
+        let guard = self
+            .inner
+            .clone()
+            .try_read_owned()
+            .expect("In-memory store lock contention");
 
-            // Convert the start + seq to the complex bound, that ensures ordering of keys
-            let range_start = match start {
-                Bound::Included(k) => Bound::Included((k.to_vec(), Reverse(seq))),
-                Bound::Excluded(k) => Bound::Excluded((k.to_vec(), Reverse(SeqNum::ZERO))),
-                Bound::Unbounded => Bound::Unbounded,
-            };
-
-            for ((found_key, Reverse(found_seq)), (found_value, found_kind)) in
-                read_guard.range((range_start, Bound::Unbounded))
-            {
-                // Respect the end bound
-                match end {
-                    Bound::Included(e) if found_key.as_slice() > e => break,
-                    Bound::Excluded(e) if found_key.as_slice() >= e => break,
-                    _ => {}
-                }
-
-                // Skip versions from the future
-                if *found_seq > seq {
-                    continue;
-                }
-
-                // If this is an older version, skip it
-                if let Some((current_key, current_seq)) = current_key.as_ref() {
-                    if current_key == found_key {
-                        assert!(current_seq > found_seq);
-                        continue;
-                    }
-                }
-                current_key = Some((found_key.clone(), *found_seq));
-
-                match found_kind {
-                    KeyKind::Delete => {}
-                    KeyKind::Set => results.push((found_key.clone(), found_value.clone())),
-                    // others may come later
-                }
-            }
-
-            results
+        Box::new(VersionedKvCursor {
+            guard,
+            seq,
+            prefix,
+            current_key: None,
+            current_value: None,
+            is_done: false,
         })
-        .flat_map(stream::iter)
-        .boxed()
     }
 }
 
@@ -219,11 +316,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_in_memory_kv_store() {
-        let kv = InMemoryKvStore::new();
+        // setup the kv store
+        let kv_store = InMemoryKvStore::new();
+        // use this to generate new incrementing sequence numbers
         let mut next_seqnum = create_seqnum_iter();
         let politics_key = "politics and economics";
         let physics_key = "physics";
         let kv_pairs = [
+            ("mathematics", "just as awesome"),
             ("maths", "awesome"),
             (physics_key, "boring"),
             ("computer science", "incredible"),
@@ -234,52 +334,65 @@ mod tests {
         .map(|(k, v)| (k, v, next_seqnum.next().unwrap()))
         .collect_vec();
         println!("kv pairs: {:?}", kv_pairs);
-
         for &(key, value, seqnum) in kv_pairs.iter() {
-            kv.set(key.into(), value.into(), seqnum, KeyKind::Set).await;
+            kv_store
+                .set(key.into(), value.into(), seqnum, KeyKind::Set)
+                .await;
         }
 
-        // -- Scanning --
-        let mut pairs_from_store = kv.scan(
-            Bound::Unbounded,
-            Bound::Unbounded,
-            next_seqnum.next().unwrap(),
-        );
+        // -- Cursor Scanning without Prefix --
+        let mut cursor = kv_store.cursor_at_prefix(vec![], next_seqnum.next().unwrap());
         let mut i = 0;
-        while let Some((key, value)) = pairs_from_store.next().await {
-            println!("read key: {:?}, value: {:?}", key, value);
-            assert_eq!(&key, kv_pairs[i].0.as_bytes());
-            assert_eq!(&value, kv_pairs[i].1.as_bytes());
+        while i < kv_pairs.len()
+            && let Some((k, v)) = cursor.next().await.unwrap()
+        {
+            let (exp_k, exp_v, _s) = kv_pairs[i];
+            assert_eq!(str::from_utf8(&k).unwrap(), exp_k);
+            assert_eq!(str::from_utf8(&v).unwrap(), exp_v);
             i += 1;
         }
-        assert_eq!(i, kv_pairs.len());
+        assert_eq!(i, kv_pairs.len(), "should have found every key once");
+        assert_eq!(cursor.next().await.unwrap(), None, "cursor should be eof");
+        drop(cursor);
+
+        // -- Cursor Scanning with Prefix --
+        let mut cursor = kv_store.cursor_at_prefix("math".into(), next_seqnum.next().unwrap());
+        assert!(matches!(cursor.next().await, Ok(Some((k, v)))
+                if &k == "mathematics".as_bytes() && &v == "just as awesome".as_bytes()));
+        assert!(matches!(cursor.next().await, Ok(Some((k, v)))
+                if &k == "maths".as_bytes() && &v == "awesome".as_bytes()));
+        drop(cursor);
 
         // -- Shadowing: Overwrite an old entry --
         let new_physics_value = "fascinating";
         let physics_seqnum = next_seqnum.next().unwrap();
-        kv.set(
-            physics_key.into(),
-            new_physics_value.into(),
-            physics_seqnum,
-            KeyKind::Set,
-        )
-        .await;
-        let phyics_entry = kv.get(physics_key.as_bytes(), physics_seqnum).await;
+        kv_store
+            .set(
+                physics_key.into(),
+                new_physics_value.into(),
+                physics_seqnum,
+                KeyKind::Set,
+            )
+            .await;
+        let phyics_entry = kv_store.get(physics_key.as_bytes(), physics_seqnum).await;
         assert_eq!(phyics_entry, Some(new_physics_value.into()));
 
         // -- Tombstone: Delete an old entry --
         let politics_seqnum = next_seqnum.next().unwrap();
-        kv.set(
-            politics_key.into(),
-            Vec::new(),
-            politics_seqnum,
-            KeyKind::Delete,
-        )
-        .await;
-        let val = kv.get(politics_key.as_bytes(), SeqNum::MAX).await;
+        kv_store
+            .set(
+                politics_key.into(),
+                Vec::new(),
+                politics_seqnum,
+                KeyKind::Delete,
+            )
+            .await;
+        let val = kv_store.get(politics_key.as_bytes(), SeqNum::MAX).await;
         assert!(val.is_none(), "just deleted entry");
         assert_eq!(
-            kv.scan(Bound::Unbounded, Bound::Unbounded, politics_seqnum,)
+            kv_store
+                .cursor_at_prefix(vec![], politics_seqnum)
+                .into_stream()
                 .collect::<Vec<_>>()
                 .await
                 .len(),
@@ -298,7 +411,9 @@ mod tests {
             // removed politics
             .filter(|&(k, _v)| k != politics_key)
             .zip_eq(
-                kv.scan(Bound::Unbounded, Bound::Unbounded, politics_seqnum)
+                kv_store
+                    .cursor_at_prefix(vec![], politics_seqnum)
+                    .into_stream()
                     .collect::<Vec<_>>()
                     .await,
             )

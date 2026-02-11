@@ -73,34 +73,6 @@ impl TableSchema {
     }
 }
 
-#[macro_export]
-macro_rules! schema {
-    (Table($name:expr) { $($col:ident : $typ:ident),* $(,)? }$(, pk($($pk_col:ident),*) )? $(,)?) => {{
-        let table_name: TempestStr<'static> = $name.try_into().unwrap();
-        let mut columns = Vec::new();
-        $(
-            let col_name = stringify!($col).try_into().unwrap();
-            let col_type = TempestType::$typ;
-            let col_schema = ColumnSchema::new(col_name, col_type);
-            columns.push(col_schema);
-        )*
-        let mut primary_key = Vec::new();
-        $(
-            $(
-                let pk_col_name: TempestStr<'static> = stringify!($pk_col).try_into().unwrap();
-                primary_key.push(
-                    columns
-                    .iter()
-                    .position(|col| col.name() == &pk_col_name)
-                    .expect(&format!("unknown column {}", stringify!($pk_col)))
-                );
-            )*
-        )?
-
-        TableSchema::new(table_name, columns, primary_key)
-    }};
-}
-
 #[derive(Debug)]
 pub(crate) struct DatabaseSchema {
     /// Name of this database. May not contain `\0`.
@@ -115,6 +87,34 @@ impl DatabaseSchema {
             tables: HashMap::new(),
         }
     }
+}
+
+#[macro_export]
+macro_rules! schema {
+    (Table($name:expr) { $($col:ident : $typ:ident),* $(,)? }$(, pk($($pk_col:ident),*) )? $(,)?) => {{
+        let table_name: TempestStr<'static> = $name.try_into().unwrap();
+        let mut _columns = Vec::new();
+        $(
+            let col_name = stringify!($col).try_into().unwrap();
+            let col_type = $crate::core::value::TempestType::$typ;
+            let col_schema = $crate::core::schema::ColumnSchema::new(col_name, col_type);
+            _columns.push(col_schema);
+        )*
+        let mut _primary_key = Vec::new();
+        $(
+            $(
+                let pk_col_name: TempestStr<'static> = stringify!($pk_col).try_into().unwrap();
+                _primary_key.push(
+                    _columns
+                    .iter()
+                    .position(|col| col.name() == &pk_col_name)
+                    .expect(&format!("unknown column {}", stringify!($pk_col)))
+                );
+            )*
+        )?
+
+        TableSchema::new(table_name, _columns, _primary_key)
+    }};
 }
 
 /// Maps database names, to their table schemas.

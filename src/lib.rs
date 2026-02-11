@@ -15,12 +15,12 @@ use crate::{
     scheduler::{AccessGuard, AccessManager, AccessMode, Resource, ResourceAccessSet},
 };
 
-pub(crate) mod core;
-pub(crate) mod kv;
-pub(crate) mod manifest;
+pub mod core;
+pub mod kv;
+pub mod manifest;
 pub mod prelude;
-pub(crate) mod query;
-pub(crate) mod scheduler;
+pub mod query;
+pub mod scheduler;
 
 /// The actual inner implementation of [`Tempest`], which itself is just a handle.
 pub(crate) struct TempestEngine {
@@ -40,6 +40,10 @@ pub struct TableContext {
     db: TempestStr<'static>,
     /// The name of the table this context belongs to.
     table: TempestStr<'static>,
+}
+
+impl TableContext {
+    // TODO: CRUD
 }
 
 #[derive(Debug)]
@@ -216,7 +220,7 @@ impl Tempest {
 
 #[cfg(test)]
 mod tests {
-    use crate::{kv::InMemoryKvStore, prelude::InMemoryManifestManager};
+    use crate::{kv::InMemoryKvStore, manifest::InMemoryManifestManager};
 
     use super::*;
 
@@ -226,7 +230,10 @@ mod tests {
         let manifest_manager = InMemoryManifestManager::new();
         let tempest = Tempest::init(Arc::new(kv_store), Arc::new(manifest_manager)).await;
         let db1_ctx = tempest.create_db("db1".try_into().unwrap()).await.unwrap();
-        let table1_schema = TableSchema::new_empty("table1".try_into().unwrap());
+        let table1_schema = schema!(Table("table1") {
+            id: Int8,
+            flag: Bool,
+        }, pk(id));
         let table1_ctx = db1_ctx
             .create_table("table1".try_into().unwrap(), false, table1_schema)
             .await
@@ -239,6 +246,7 @@ mod tests {
             .await
             .unwrap();
 
+        _ = table1_ctx;
         // TODO: CRUD table operations, i.e. actually setting up the schema, inserting, reading...
     }
 }
