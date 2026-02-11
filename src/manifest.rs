@@ -65,7 +65,7 @@ pub struct InMemoryManifestManager {
 }
 
 impl InMemoryManifestManager {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Default::default()
     }
 }

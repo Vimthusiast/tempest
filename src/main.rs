@@ -10,9 +10,7 @@ async fn main() {
         .await
         .expect("could not create data directory");
     let kv = InMemoryKvStore::new();
-    let manifest_manager = FileSystemManifestManager::open(data_dir)
-        .await
-        .expect("could not open manifest manager");
+    let manifest_manager = InMemoryManifestManager::new();
     let tempest = Tempest::init(Arc::new(kv), Arc::new(manifest_manager)).await;
     let db_ctx = tempest
         .create_db("main".try_into().unwrap())
@@ -26,10 +24,14 @@ async fn main() {
             alive: Bool,
         }, pk(id));
         println!("schema for users: {:#?}", users_schema);
-        let users_ctx = db_ctx
+        let mut users_ctx = db_ctx
             .create_table("users".try_into().unwrap(), true, users_schema)
             .await
             .expect("could not create users table");
         println!("table users: {:#?}", users_ctx);
+        users_ctx
+            .insert(&[TempestValue::Int8(0), TempestValue::Bool(true)])
+            .await
+            .unwrap();
     }
 }

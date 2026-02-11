@@ -43,11 +43,7 @@ pub enum TempestError {
     #[display("Unknown namespace: {}", _0.number)]
     UnknownNamespace(TryFromPrimitiveError<NS>),
 
-    // -- I/O Errors --
-    #[display("I/O Error: {}", _0)]
-    IoError(std::io::Error),
-
-    // -- Others (TODO) --
+    // -- Schema Errors --
     #[from(skip)]
     #[display("A database with the name '{}' already exists.", _0)]
     DatabaseAlreadyExists(#[error(not(source))] TempestStr<'static>),
@@ -68,4 +64,11 @@ pub enum TempestError {
         #[error(not(source))] TempestStr<'static>,
         #[error(not(source))] TempestStr<'static>,
     ),
+
+    // -- Scheduling Errors --
+    MissingAccessMode,
+
+    // -- I/O Errors --
+    #[display("I/O Error: {}", _0)]
+    IoError(std::io::Error),
 }

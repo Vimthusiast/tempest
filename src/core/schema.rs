@@ -5,12 +5,14 @@ use std::{
 
 use crate::{
     core::{
-        DecodeError, NS, SliceReader, TempestError, TempestKey, TempestReader, TempestStr, TempestWriter, value::{TempestType, TempestValue}
+        DecodeError, NS, SliceReader, TempestError, TempestKey, TempestReader, TempestStr,
+        TempestWriter,
+        value::{TempestType, TempestValue},
     },
     kv::KvStore,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ColumnSchema {
     /// Name of this column. May not contain `\0`.
     name: TempestStr<'static>,
@@ -28,7 +30,7 @@ impl ColumnSchema {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TableSchema {
     /// Name of this table. May not contain `\0`.
     name: TempestStr<'static>,
@@ -156,17 +158,26 @@ impl Catalog {
         if db_schema.tables.contains_key(&table) {
             return Err(TempestError::TableAlreadyExists(db, table));
         }
-        db_schema
-            .tables
-            .insert(table.clone(), schema);
+        db_schema.tables.insert(table.clone(), schema);
         Ok(())
     }
 
-    pub(crate) fn has_table(&self, db: &TempestStr<'static>, table: &TempestStr<'static>) -> bool {
+    pub(crate) fn has_table(&self, db: &TempestStr<'_>, table: &TempestStr<'_>) -> bool {
         self.cache
             .get(db)
             .map(|db_schema| db_schema.tables.contains_key(table))
             .unwrap_or_default()
+    }
+
+    pub(crate) fn get_table<'a>(
+        &'a self,
+        db: &'a TempestStr<'_>,
+        table: &'a TempestStr<'_>,
+    ) -> Option<&'a TableSchema> {
+        self.cache
+            .get(db)
+            .map(|db_schema| db_schema.tables.get(table))
+            .flatten()
     }
 }
 
@@ -185,7 +196,7 @@ pub(crate) struct RowEncoder<'a> {
 }
 
 impl<'a> RowEncoder<'a> {
-    fn new(db: &'a TempestStr<'a>, schema: &'a TableSchema) -> Self {
+    pub(crate) fn new(db: &'a TempestStr<'a>, schema: &'a TableSchema) -> Self {
         let value_indices = schema.value_indices();
         let mut prefix_bytes = Vec::with_capacity(3 + db.len() + schema.name.len());
         prefix_bytes.write_u8(NS::DATA.into());
@@ -199,7 +210,7 @@ impl<'a> RowEncoder<'a> {
         }
     }
 
-    fn encode(&self, values: &[TempestValue]) -> (Vec<u8>, Vec<u8>) {
+    pub(crate) fn encode(&self, values: &[TempestValue]) -> (Vec<u8>, Vec<u8>) {
         let mut key_bytes = self.prefix_bytes.clone();
         for idx in &self.schema.primary_key {
             // NB: Use encode_lexic here, to keep lexicographical ordering of keys on byte level

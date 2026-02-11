@@ -5,6 +5,7 @@ use futures::{
     StreamExt,
     stream::{self, BoxStream},
 };
+use itertools::Itertools;
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
@@ -274,6 +275,13 @@ impl KvStore for InMemoryKvStore {
     }
 
     async fn set(&self, key: Vec<u8>, value: Vec<u8>, seq: SeqNum, kind: KeyKind) {
+        println!(
+            "Setting key [{}] to value [{}] (seq: {}, kind: {})",
+            key.iter().map(|b| format!("{:02X}", b)).format(" "),
+            value.iter().map(|b| format!("{:02X}", b)).format(" "),
+            seq,
+            kind
+        );
         self.inner
             .write()
             .await
