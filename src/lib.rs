@@ -3,13 +3,12 @@ use std::{collections::HashSet, ops::Range, sync::Arc};
 #[macro_use]
 extern crate derive_more;
 
-use itertools::Itertools;
 use tokio::sync::RwLock;
 
 use crate::{
     core::{
-        TempestError, TempestKey, TempestStr, TempestValue,
-        schema::{Catalog, RowEncoder, TableSchema},
+        TempestError, TempestStr, TempestValue,
+        schema::{Catalog, RowEncoder, TableSchema, TempestRow},
     },
     kv::{KeyKind, KvStore, SeqNum},
     manifest::ManifestManager,
@@ -44,9 +43,6 @@ pub struct TableContext {
     /// The name of the table this context belongs to.
     table: TempestStr<'static>,
     schema: TableSchema,
-    /// The computed prefix of keys for this table.
-    #[debug("[{}]", key_prefix.iter().map(|b| format!("{:02X}", b)).join(" "))]
-    key_prefix: Vec<u8>,
     current_range: Option<Range<SeqNum>>,
 }
 
@@ -58,8 +54,6 @@ impl TableContext {
         db: TempestStr<'static>,
         table: TempestStr<'static>,
     ) -> Self {
-        let mut key_prefix = Vec::new();
-        TempestKey::encode_prefix(&mut key_prefix, &db, &table);
         let schema = instance
             .0
             .catalog
@@ -75,44 +69,46 @@ impl TableContext {
             db,
             table,
             schema,
-            key_prefix,
             current_range: None,
         }
     }
 
-    pub async fn insert(&mut self, values: &[TempestValue]) -> Result<(), TempestError> {
-        println!(
-            "Inserting {:?} into table '{}' in database '{}'.",
-            values, self.table, self.db
-        );
-        if !self.exclusive {
-            return Err(TempestError::MissingAccessMode);
-        }
-        let encoder = RowEncoder::new(&self.db, &self.schema);
-        let (key, value) = encoder.encode(values);
-        let range = if let Some(r) = &mut self.current_range
-            && !r.is_empty()
-        {
-            r
-        } else {
-            let r = self
-                .instance
+    pub async fn insert(&mut self, rows: &[TempestRow]) -> Result<(), TempestError> {
+        for row in rows {
+            let values = &row.values;
+            println!(
+                "Inserting {:?} into table '{}' in database '{}'.",
+                values, self.table, self.db
+            );
+            if !self.exclusive {
+                return Err(TempestError::MissingAccessMode);
+            }
+            let encoder = RowEncoder::new(&self.db, &self.schema);
+            let (key, value) = encoder.encode(values);
+            let range = if let Some(r) = &mut self.current_range
+                && !r.is_empty()
+            {
+                r
+            } else {
+                let r = self
+                    .instance
+                    .0
+                    .manifest_manager
+                    .allocate_seqnum_range(64)
+                    .await?;
+                self.current_range = Some(r);
+                self.current_range.as_mut().expect("just inserted")
+            };
+            let seq = range.start;
+            let new_start = SeqNum::new(seq.get() + 1)
+                .expect("as seqnum range goes higher than seq, seq+1 is valid seqnum");
+            range.start = new_start;
+            self.instance
                 .0
-                .manifest_manager
-                .allocate_seqnum_range(64)
-                .await?;
-            self.current_range = Some(r);
-            self.current_range.as_mut().expect("just inserted")
-        };
-        let seq = range.start;
-        let new_start = SeqNum::new(seq.get() + 1)
-            .expect("as seqnum range goes higher than seq, seq+1 is valid seqnum");
-        range.start = new_start;
-        self.instance
-            .0
-            .kv_store
-            .set(key, value, seq, KeyKind::Set)
-            .await;
+                .kv_store
+                .set(key, value, seq, KeyKind::Set)
+                .await;
+        }
         Ok(())
     }
     // TODO: CRUD

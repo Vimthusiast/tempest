@@ -181,8 +181,14 @@ impl Catalog {
     }
 }
 
-pub(crate) struct TempestRow {
+pub struct TempestRow {
     pub values: Vec<TempestValue>,
+}
+
+impl TempestRow {
+    pub fn new(values: Vec<TempestValue>) -> Self {
+        Self { values }
+    }
 }
 
 #[derive(Debug)]

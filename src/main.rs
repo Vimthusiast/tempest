@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tempest::{prelude::*, schema};
+use tempest::{core::schema::TempestRow, prelude::*, schema};
 use tokio::fs;
 
 #[tokio::main]
@@ -29,9 +29,11 @@ async fn main() {
             .await
             .expect("could not create users table");
         println!("table users: {:#?}", users_ctx);
-        users_ctx
-            .insert(&[TempestValue::Int8(0), TempestValue::Bool(true)])
-            .await
-            .unwrap();
+        let rows = &[
+            TempestRow::new(vec![TempestValue::Int8(0), TempestValue::Bool(true)]),
+            TempestRow::new(vec![TempestValue::Int8(1), TempestValue::Bool(false)]),
+            TempestRow::new(vec![TempestValue::Int8(2), TempestValue::Bool(true)]),
+        ];
+        users_ctx.insert(rows).await.unwrap();
     }
 }
