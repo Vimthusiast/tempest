@@ -5,13 +5,17 @@ edition = "2024"
 
 [dependencies]
 async-trait = "0.1.89"
+bincode = "=1.3.3"
+bytes = "1.11.1"
+crc64 = "2.0.0"
 derive_more = { version = "2.1.1", features = ["full"] }
 futures = "0.3.31"
 integer-encoding = "4.1.0"
 itertools = "0.14.0"
 logos = "0.16.1"
-nonmax = "0.5.5"
+nonmax = { version = "0.5.5", features = ["serde"] }
 num_enum = "0.7.5"
+serde = { version = "1.0.228", features = ["derive"] }
 strum = { version = "0.27.2", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time", "fs", "io-util"] }
 tokyo = "1.0.0"

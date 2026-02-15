@@ -14,6 +14,7 @@ mod tokio_fio;
 mod virtual_fio;
 
 use futures::stream::BoxStream;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 pub use tokio_fio::*;
 pub use virtual_fio::*;
 
@@ -22,39 +23,33 @@ pub struct FioDirEntry {
     is_dir: bool,
 }
 
-#[async_trait]
-pub trait FioFile: Send + Sync {
-    /// Writes a buffer into this writer, returning how many bytes were written.
-    ///
-    /// This function will attempt to write the entire contents of `buf`, but
-    /// the entire write might not succeed, or the write may also generate an
-    /// error. Typically, a call to `write` represents one attempt to write to
-    /// any wrapped object.
-    async fn write(&mut self, buf: &[u8]) -> io::Result<usize>;
-
-    /// Attempts to write an entire buffer into this writer.
-    async fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
-
-    /// Reads the exact number of bytes required to fill `buf`.
-    async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-
-    /// Reads all bytes until EOF in this source, placing them into `buf`.
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize>;
-
-    async fn sync_all(&mut self) -> io::Result<()>;
-
-    async fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64>;
-
-    async fn seek_relative(&mut self, offset: i64) -> io::Result<()> {
-        self.seek(io::SeekFrom::Current(offset)).await?;
-        Ok(())
+impl FioDirEntry {
+    #[inline]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
+    #[inline]
+    pub const fn is_dir(&self) -> bool {
+        self.is_dir
+    }
+
+    pub const fn is_file(&self) -> bool {
+        !self.is_dir
+    }
+}
+
+/// # File I/O File Trait
+///
+/// A trait that abstracts asynchronous I/O from the file system.
+#[async_trait]
+pub trait FioFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync {
+    async fn sync_all(&mut self) -> io::Result<()>;
     async fn size(&self) -> io::Result<u64>;
 }
 
 #[async_trait]
-pub trait FioFS: Send + Sync {
+pub trait FioFS: Send + Sync + Clone {
     type File: FioFile;
 
     /// Retrieve a [`Self::File`], which is just a thin handle.
@@ -62,6 +57,9 @@ pub trait FioFS: Send + Sync {
 
     /// Create a new [`Self::File`], returning the handle.
     async fn create(&self, path: &Path) -> io::Result<Self::File>;
+
+    /// Recursively creates a directory and all of its parent components if they are missing.
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()>;
 
     /// Rename a file, essentially moving it to another location.
     /// The path `to` may point to an existing file, which is then deleted.

@@ -1,10 +1,15 @@
-use std::{os::unix::fs::MetadataExt, path::Path};
+use std::{
+    os::unix::fs::MetadataExt,
+    path::Path,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use futures::{
     StreamExt,
     stream::{self, BoxStream},
 };
-use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{self, AsyncRead, AsyncSeek, AsyncWrite};
 
 use async_trait::async_trait;
 
@@ -12,30 +17,48 @@ use crate::fio::{FioDirEntry, FioFS, FioFile};
 
 pub struct TokioFile(tokio::fs::File);
 
+impl AsyncRead for TokioFile {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TokioFile {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl AsyncSeek for TokioFile {
+    fn start_seek(mut self: Pin<&mut Self>, position: io::SeekFrom) -> io::Result<()> {
+        Pin::new(&mut self.0).start_seek(position)
+    }
+
+    fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
+        Pin::new(&mut self.0).poll_complete(cx)
+    }
+}
+
 #[async_trait]
 impl FioFile for TokioFile {
-    async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf).await
-    }
-
-    async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.0.write_all(buf).await
-    }
-
-    async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read_exact(buf).await
-    }
-
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        self.0.read_to_end(buf).await
-    }
-
     async fn sync_all(&mut self) -> io::Result<()> {
         self.0.sync_all().await
-    }
-
-    async fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-        self.0.seek(pos).await
     }
 
     async fn size(&self) -> io::Result<u64> {
@@ -59,6 +82,10 @@ impl FioFS for TokioFileSystem {
     async fn create(&self, path: &Path) -> io::Result<Self::File> {
         let file = tokio::fs::File::create(path).await?;
         Ok(TokioFile(file))
+    }
+
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        tokio::fs::create_dir_all(path).await
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {

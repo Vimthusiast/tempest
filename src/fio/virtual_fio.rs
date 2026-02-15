@@ -7,86 +7,93 @@ use std::{
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
-use itertools::Itertools;
-use tokio::sync::RwLock;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use crate::fio::{FioDirEntry, FioFS, FioFile};
 
 pub struct VirtualFile {
-    data: Arc<RwLock<Vec<u8>>>,
-    pos: usize,
+    data: Arc<std::sync::RwLock<Vec<u8>>>,
+    pos: u64,
 }
 
 impl VirtualFile {
-    fn new(data: Arc<RwLock<Vec<u8>>>) -> Self {
+    fn new(data: Arc<std::sync::RwLock<Vec<u8>>>) -> Self {
         Self { data, pos: 0 }
     }
 }
 
-#[async_trait]
-impl FioFile for VirtualFile {
-    async fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut data = self.data.write().await;
-        let end_pos = self.pos + buf.len();
-        if end_pos > data.len() {
-            data.resize(end_pos, 0);
+impl AsyncRead for VirtualFile {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Poisoned lock"))?;
+        let start = self.pos as usize;
+        let end = std::cmp::min(start + buf.remaining(), data.len());
+        // only read if there is something left to read
+        if start < end {
+            let slice = &data[start..end];
+            buf.put_slice(slice);
+            drop(data);
+            self.pos = end as u64;
         }
-        data[self.pos..end_pos].copy_from_slice(buf);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for VirtualFile {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Poisoned lock"))?;
+        let end_pos = self.pos + buf.len() as u64;
+        if end_pos > data.len() as u64 {
+            data.resize(end_pos as usize, 0);
+        }
+        data[(self.pos as usize)..(end_pos as usize)].copy_from_slice(buf);
+        drop(data);
         self.pos = end_pos;
-        Ok(buf.len())
+        std::task::Poll::Ready(Ok(buf.len()))
     }
 
-    async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.write(buf).await?;
-        Ok(())
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
     }
 
-    async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let data = self.data.read().await;
-        let start = self.pos;
-        if start >= data.len() {
-            Ok(0)
-        } else {
-            self.pos = data.len();
-            buf.extend_from_slice(&data[start..]);
-            Ok(self.pos - start)
-        }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
     }
+}
 
-    async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let data = self.data.read().await;
-        let start = self.pos;
-        let remaining = data.len() - start;
-        if remaining < buf.len() {
-            Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Unexpected end of file",
-            ))
-        } else {
-            self.pos += buf.len();
-            buf.copy_from_slice(&data[start..self.pos]);
-            Ok(buf.len())
-        }
-    }
-
-    async fn sync_all(&mut self) -> io::Result<()> {
-        // No-op, virtual file-system is always synced, there is no buffering or syscall
-        Ok(())
-    }
-
-    async fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-        let Some(new_pos) = (match pos {
+impl AsyncSeek for VirtualFile {
+    fn start_seek(mut self: std::pin::Pin<&mut Self>, position: io::SeekFrom) -> io::Result<()> {
+        let Some(new_pos) = (match position {
             io::SeekFrom::Start(offset) => {
-                self.pos = offset as usize;
-                return Ok(self.pos as u64);
+                self.pos = offset;
+                return Ok(());
             }
-            io::SeekFrom::End(offset) => self
+            io::SeekFrom::End(offset) => (self
                 .data
                 .read()
-                .await
-                .len()
-                .checked_add_signed(offset as isize),
-            io::SeekFrom::Current(offset) => self.pos.checked_add_signed(offset as isize),
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "Poisoned lock"))?
+                .len() as u64)
+                .checked_add_signed(offset),
+            io::SeekFrom::Current(offset) => self.pos.checked_add_signed(offset),
         }) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -94,21 +101,43 @@ impl FioFile for VirtualFile {
             ));
         };
         self.pos = new_pos;
-        Ok(self.pos as u64)
+        Ok(())
+    }
+
+    fn poll_complete(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<u64>> {
+        std::task::Poll::Ready(Ok(self.pos))
+    }
+}
+
+#[async_trait]
+impl FioFile for VirtualFile {
+    async fn sync_all(&mut self) -> io::Result<()> {
+        // No-op, virtual file-system is always synced, there is no buffering or syscall
+        Ok(())
     }
 
     async fn size(&self) -> io::Result<u64> {
-        let data = self.data.read().await;
+        let data = self
+            .data
+            .read()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Poisoned lock"))?;
         Ok(data.len() as u64)
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct VirtualFileSystem {
-    files: Arc<RwLock<BTreeMap<PathBuf, Arc<RwLock<Vec<u8>>>>>>,
+    files: Arc<tokio::sync::RwLock<BTreeMap<PathBuf, Arc<std::sync::RwLock<Vec<u8>>>>>>,
 }
 
 impl VirtualFileSystem {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
     fn normalize(path: impl AsRef<Path>) -> PathBuf {
         let mut components = Vec::new();
 
@@ -154,16 +183,23 @@ impl FioFS for VirtualFileSystem {
 
     async fn create(&self, path: &Path) -> io::Result<Self::File> {
         let path = Self::normalize(path);
+        println!("Creating file {:?}", path);
         let mut files = self.files.write().await;
-        let data = Arc::new(RwLock::new(Vec::new()));
+        let data = Arc::new(std::sync::RwLock::new(Vec::new()));
         files.insert(path, data.clone());
 
         Ok(VirtualFile::new(data))
     }
 
+    async fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
+        // No-op, virtual file-system is has no hierarchy, so we don't manage any directory entries
+        Ok(())
+    }
+
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let from = Self::normalize(from);
         let to = Self::normalize(to);
+        println!("Renaming file {:?} to {:?}", from, to);
         let mut files = self.files.write().await;
         let data = files
             .remove(&from)
@@ -178,6 +214,7 @@ impl FioFS for VirtualFileSystem {
         path: &Path,
     ) -> io::Result<BoxStream<'static, io::Result<FioDirEntry>>> {
         let search_path = Self::normalize(path);
+        println!("Reading directory {:?}", search_path);
         let mut prefix = search_path.to_string_lossy().into_owned();
         if !prefix.ends_with('/') {
             prefix.push('/');
@@ -222,6 +259,7 @@ mod tests {
     use super::*;
     use crate::fio::{FioFS, FioFile};
     use io::SeekFrom;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn test_normalization_and_basic_io() {
