@@ -43,7 +43,7 @@ impl FioDirEntry {
 ///
 /// A trait that abstracts asynchronous I/O from the file system.
 #[async_trait]
-pub trait FioFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync {
+pub trait FioFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin {
     async fn sync_all(&mut self) -> io::Result<()>;
     async fn size(&self) -> io::Result<u64>;
 }

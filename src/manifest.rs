@@ -15,7 +15,10 @@ use tokio::{
     pin,
 };
 
-use crate::{core::SeqNum, fio::FioFS};
+use crate::{
+    core::SeqNum,
+    fio::{FioFS, FioFile},
+};
 
 fn get_sst_path(level: u8, file_number: u64) -> PathBuf {
     PathBuf::new()
@@ -266,6 +269,7 @@ impl<F: FioFS> ManifestManager<F> {
 
         // flush remaining bytes to file
         file.flush().await?;
+        file.sync_all().await?;
         Ok(())
     }
 
