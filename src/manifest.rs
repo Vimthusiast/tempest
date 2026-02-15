@@ -154,6 +154,8 @@ impl ManifestHeader {
     }
 }
 
+const MANIFEST_RECORD_PREFIX_SIZE: usize = 12;
+
 #[derive(Debug)]
 pub struct ManifestManager<F: FioFS> {
     // -- Manager Data --
@@ -169,8 +171,6 @@ pub struct ManifestManager<F: FioFS> {
 }
 
 impl<F: FioFS> ManifestManager<F> {
-    const RECORD_PREFIX_SIZE: usize = 12;
-
     pub(crate) async fn init(fs: F, manifest_dir: impl Into<PathBuf>) -> io::Result<Self> {
         let manifest_dir = manifest_dir.into();
         fs.create_dir_all(&manifest_dir).await?;
@@ -279,7 +279,7 @@ impl<F: FioFS> ManifestManager<F> {
         scratch.clear();
 
         // reserve space for the frame prefix
-        scratch.put_bytes(0, Self::RECORD_PREFIX_SIZE);
+        scratch.put_bytes(0, MANIFEST_RECORD_PREFIX_SIZE);
 
         // create synchronous writer into scratch buffer
         let mut sync_writer = scratch.writer();
@@ -289,8 +289,8 @@ impl<F: FioFS> ManifestManager<F> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // calculate length and checksum and store in frame prefix
-        let data_len = (scratch.len() - Self::RECORD_PREFIX_SIZE) as u32;
-        let checksum = crc64(0, &scratch[Self::RECORD_PREFIX_SIZE..]);
+        let data_len = (scratch.len() - MANIFEST_RECORD_PREFIX_SIZE) as u32;
+        let checksum = crc64(0, &scratch[MANIFEST_RECORD_PREFIX_SIZE..]);
         scratch[0..4].copy_from_slice(&data_len.to_le_bytes());
         scratch[4..12].copy_from_slice(&checksum.to_le_bytes());
 
@@ -325,7 +325,7 @@ impl<F: FioFS> ManifestManager<F> {
         reader: &mut R,
         scratch: &mut Vec<u8>,
     ) -> io::Result<Option<VersionEditV1>> {
-        let mut header_buf = [0u8; Self::RECORD_PREFIX_SIZE];
+        let mut header_buf = [0u8; MANIFEST_RECORD_PREFIX_SIZE];
 
         // peek at the first byte, to see if we have a clean EOF
         let n = reader.read(&mut header_buf[..1]).await?;
