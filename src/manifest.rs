@@ -45,6 +45,8 @@ pub struct SstMetadata {
 
 impl SstMetadata {
     /// Returns the file system path for the SST this Metadata references.
+    /// The path is returned as within the `ssts` subdirectory of `data`.
+    /// To get the whole path, join these two together.
     pub fn get_path(&self) -> PathBuf {
         get_sst_path(self.level, self.file_number)
     }
@@ -162,6 +164,7 @@ const MANIFEST_RECORD_PREFIX_SIZE: usize = 12;
 #[derive(Debug)]
 pub struct ManifestManager<F: FioFS> {
     // -- Manager Data --
+    root_dir: PathBuf,
     manifest_dir: PathBuf,
     current_file: PathBuf,
     #[debug("{}", type_name::<F>())]
@@ -174,11 +177,13 @@ pub struct ManifestManager<F: FioFS> {
 }
 
 impl<F: FioFS> ManifestManager<F> {
-    pub(crate) async fn init(fs: F, manifest_dir: impl Into<PathBuf>) -> io::Result<Self> {
-        let manifest_dir = manifest_dir.into();
+    pub(crate) async fn init(fs: F, root_dir: impl Into<PathBuf>) -> io::Result<Self> {
+        let root_dir = root_dir.into();
+        let manifest_dir = root_dir.join("manifests");
         fs.create_dir_all(&manifest_dir).await?;
 
         let mut res = Self {
+            root_dir,
             manifest_dir,
             current_file: PathBuf::new(),
             fs,
@@ -424,6 +429,18 @@ impl<F: FioFS> ManifestManager<F> {
 
         Ok(next_file_number)
     }
+
+    pub(crate) fn all_live_files(&self) -> HashSet<PathBuf> {
+        let mut live = HashSet::new();
+
+        live.insert(self.current_file.clone());
+
+        for sst in &self.ssts {
+            live.insert(self.root_dir.join(sst.get_path()));
+        }
+
+        live
+    }
 }
 
 #[cfg(test)]
@@ -495,16 +512,14 @@ mod tests {
     #[tokio::test]
     async fn test_manifest_manager() {
         let fs = VirtualFileSystem::new();
-        let manifest_dir = "data/manifest";
+        let root_dir = "data";
 
         let first_range;
         let second_range;
 
         println!("Creating first manifest manager");
         {
-            let mut manifest_manager = ManifestManager::init(fs.clone(), manifest_dir)
-                .await
-                .unwrap();
+            let mut manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
             first_range = manifest_manager.seqnum_range(24).await.unwrap();
             println!(
                 "First manifest manager final state: {:#?}",
@@ -515,9 +530,7 @@ mod tests {
 
         println!("Creating second manifest manager");
         {
-            let mut manifest_manager = ManifestManager::init(fs.clone(), manifest_dir)
-                .await
-                .unwrap();
+            let mut manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
             second_range = manifest_manager.seqnum_range(24).await.unwrap();
             println!(
                 "Second manifest manager final state: {:#?}",
@@ -528,9 +541,7 @@ mod tests {
 
         println!("Creating third manifest manager");
         {
-            let mut manifest_manager = ManifestManager::init(fs.clone(), manifest_dir)
-                .await
-                .unwrap();
+            let mut manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
             manifest_manager.flush_to_new_file().await.unwrap();
             let first_file_num = manifest_manager.next_file_number().await.unwrap();
             let second_file_num = manifest_manager.next_file_number().await.unwrap();
@@ -539,8 +550,15 @@ mod tests {
                 "Third manifest manager final state: {:#?}",
                 manifest_manager
             );
+            let live_files = manifest_manager.all_live_files();
+            println!("-- Live Files --");
+            for lf in &live_files {
+                println!("{:?}", lf);
+            }
+
             assert_eq!(first_file_num + 1, second_file_num);
             assert_eq!(second_file_num + 1, third_file_num);
+            assert_eq!(live_files.len(), 1);
         }
 
         assert_eq!(
