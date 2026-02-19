@@ -39,7 +39,7 @@ fn get_sst_path(level: u8, file_number: u64) -> PathBuf {
 /// [`get_path`]: Self::get_path
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SstMetadata {
-    file_number: u64,
+    filenum: u64,
     file_size: u64,
     level: u8,
     smallest_key: Vec<u8>,
@@ -51,31 +51,31 @@ impl SstMetadata {
     /// The path is returned as within the `ssts` subdirectory of `data`.
     /// To get the whole path, join these two together.
     pub fn get_path(&self) -> PathBuf {
-        get_sst_path(self.level, self.file_number)
+        get_sst_path(self.level, self.filenum)
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SstDeletion {
-    file_number: u64,
+    filenum: u64,
     level: u8,
 }
 
 impl SstDeletion {
     pub fn get_path(&self) -> PathBuf {
-        get_sst_path(self.level, self.file_number)
+        get_sst_path(self.level, self.filenum)
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VersionEditV1 {
-    next_seqnum: Option<SeqNum>,
-    next_file_number: Option<u64>,
+    seqnum_limit: Option<SeqNum>,
+    filenum_limit: Option<u64>,
     /// A list of new [`SstMetadata`] objects that register SST files to the [`ManifestManager`].
-    added_ssts: Option<Arc<[SstMetadata]>>,
+    ssts_added: Option<Arc<[SstMetadata]>>,
     /// A list of removed [`SstMetadata`] objects, identified by their level and file ID,
     /// that register SST files to the [`ManifestManager`].
-    removed_ssts: Option<Arc<[SstDeletion]>>,
+    ssts_removed: Option<Arc<[SstDeletion]>>,
 }
 
 /// A versioned list of all different version edits to the [`ManifestManager`].
@@ -96,10 +96,9 @@ impl VersionEdit {
 /// An **immutable** version of the [`ManifestManager`]s internal state.
 #[derive(Debug, Clone)]
 pub struct ManifestVersion {
-    next_seqnum: SeqNum,
-    next_file_number: u64,
+    seqnum_limit: SeqNum,
+    filenum_limit: u64,
     /// List of active SSTs on disk.
-    // TODO: Use Arc<[SstMetadata]> instead
     ssts: Arc<[SstMetadata]>,
     filepath: Arc<Path>,
 }
@@ -236,8 +235,8 @@ impl<F: FioFS> ManifestManager<F> {
             fs,
 
             current_version: ArcSwap::new(Arc::new(ManifestVersion {
-                next_seqnum: SeqNum::START,
-                next_file_number: 0,
+                seqnum_limit: SeqNum::START,
+                filenum_limit: 0,
                 ssts: Arc::new([]),
                 filepath: Arc::from(PathBuf::from("")),
             })),
@@ -308,9 +307,9 @@ impl<F: FioFS> ManifestManager<F> {
             // update the initial offsets to the limit
             let current_arc = res.current_version.load();
             res.filenum_current
-                .store(current_arc.next_file_number, Ordering::SeqCst);
+                .store(current_arc.filenum_limit, Ordering::SeqCst);
             res.seqnum_current
-                .store(current_arc.next_seqnum.get(), Ordering::SeqCst);
+                .store(current_arc.seqnum_limit.get(), Ordering::SeqCst);
         } else {
             // when there is no file, create one
             let filenum = 0;
@@ -344,10 +343,10 @@ impl<F: FioFS> ManifestManager<F> {
             writer.file.write_all(&header_buf).await?;
 
             let edit = VersionEditV1 {
-                next_seqnum: Some(SeqNum::START),
-                next_file_number: Some(filenum + FILENUM_LIMIT_STEP),
-                added_ssts: None,
-                removed_ssts: None,
+                seqnum_limit: Some(SeqNum::START),
+                filenum_limit: Some(filenum + FILENUM_LIMIT_STEP),
+                ssts_added: None,
+                ssts_removed: None,
             };
 
             // write the first setup version edit
@@ -385,10 +384,10 @@ impl<F: FioFS> ManifestManager<F> {
 
         // create a final version edit, that tightens down the seqnum and filenum limits
         let edit = VersionEdit::V1(VersionEditV1 {
-            next_seqnum: Some(final_seq),
-            next_file_number: Some(final_filenum),
-            added_ssts: None,
-            removed_ssts: None,
+            seqnum_limit: Some(final_seq),
+            filenum_limit: Some(final_filenum),
+            ssts_added: None,
+            ssts_removed: None,
         });
 
         // write the final version edit
@@ -428,10 +427,10 @@ impl<F: FioFS> ManifestManager<F> {
 
         // there will only be one edit at first
         let edit = VersionEdit::V1(VersionEditV1 {
-            next_seqnum: Some(current_snapshot.next_seqnum),
-            next_file_number: Some(current_snapshot.next_file_number),
-            added_ssts: Some(current_snapshot.ssts.clone()),
-            removed_ssts: None,
+            seqnum_limit: Some(current_snapshot.seqnum_limit),
+            filenum_limit: Some(current_snapshot.filenum_limit),
+            ssts_added: Some(current_snapshot.ssts.clone()),
+            ssts_removed: None,
         });
 
         // compute and update the new file path
@@ -472,30 +471,32 @@ impl<F: FioFS> ManifestManager<F> {
         let current_arc = self.current_version.load();
 
         let mut new_ssts = current_arc.ssts.to_vec();
-        if let Some(added_ssts) = edit.added_ssts {
+        if let Some(added_ssts) = edit.ssts_added {
             new_ssts.extend(added_ssts.iter().cloned());
         }
 
-        if let Some(removed_ssts) = edit.removed_ssts
+        if let Some(removed_ssts) = edit.ssts_removed
             && !removed_ssts.is_empty()
         {
-            let removed_ids: HashSet<u64> = removed_ssts.iter().map(|d| d.file_number).collect();
-            new_ssts.retain(|sst| !removed_ids.contains(&sst.file_number));
+            let removed_ids: HashSet<u64> = removed_ssts.iter().map(|d| d.filenum).collect();
+            new_ssts.retain(|sst| !removed_ids.contains(&sst.filenum));
         }
 
-        if let Some(next_seqnum) = edit.next_seqnum {
+        if let Some(next_seqnum) = edit.seqnum_limit {
             self.seqnum_limit.store(next_seqnum.get(), Ordering::SeqCst);
         }
 
-        if let Some(next_filenum) = edit.next_file_number {
+        if let Some(next_filenum) = edit.filenum_limit {
             self.filenum_limit.store(next_filenum, Ordering::SeqCst);
         }
 
         let new_version = ManifestVersion {
-            next_seqnum: edit.next_seqnum.unwrap_or_else(|| current_arc.next_seqnum),
-            next_file_number: edit
-                .next_file_number
-                .unwrap_or_else(|| current_arc.next_file_number),
+            seqnum_limit: edit
+                .seqnum_limit
+                .unwrap_or_else(|| current_arc.seqnum_limit),
+            filenum_limit: edit
+                .filenum_limit
+                .unwrap_or_else(|| current_arc.filenum_limit),
             ssts: new_ssts.into(),
             filepath: current_arc.filepath.clone(),
         };
@@ -532,10 +533,7 @@ impl<F: FioFS> ManifestManager<F> {
         Ok(())
     }
 
-    pub async fn decode_manifest_file_body(
-        &self,
-        writer: &mut ManifestWriter<F>,
-    ) -> io::Result<()> {
+    async fn decode_manifest_file_body(&self, writer: &mut ManifestWriter<F>) -> io::Result<()> {
         // read and apply the edits
         while let Some(e) = Self::read_framed_edit(writer).await? {
             self.apply_to_mem_and_swap(e);
@@ -626,10 +624,10 @@ impl<F: FioFS> ManifestManager<F> {
         assert_manifest_writer_guard!(self, writer_guard);
 
         let edit = VersionEdit::V1(VersionEditV1 {
-            next_seqnum: Some(limit),
-            next_file_number: None,
-            added_ssts: None,
-            removed_ssts: None,
+            seqnum_limit: Some(limit),
+            filenum_limit: None,
+            ssts_added: None,
+            ssts_removed: None,
         });
         self.write_version_edit(edit, writer_guard).await?;
         Ok(())
@@ -642,10 +640,10 @@ impl<F: FioFS> ManifestManager<F> {
     ) -> io::Result<()> {
         assert_manifest_writer_guard!(self, writer_guard);
         let edit = VersionEdit::V1(VersionEditV1 {
-            next_seqnum: None,
-            next_file_number: Some(limit),
-            added_ssts: None,
-            removed_ssts: None,
+            seqnum_limit: None,
+            filenum_limit: Some(limit),
+            ssts_added: None,
+            ssts_removed: None,
         });
         self.write_version_edit(edit, writer_guard).await?;
         Ok(())
@@ -666,8 +664,8 @@ impl<F: FioFS> ManifestManager<F> {
 
             let new_current = current + size;
 
-            let current_seqnum = SeqNum::new(current).expect("checked in range");
-            let new_seqnum: SeqNum = new_current.try_into()?;
+            let current_seqnum = current.try_into().expect("checked in range");
+            let new_seqnum = new_current.try_into()?;
 
             if new_current <= limit {
                 if self
@@ -792,7 +790,7 @@ mod tests {
         let cases = [
             (
                 SstMetadata {
-                    file_number: 242,
+                    filenum: 242,
                     file_size: (2 << 10) + 0xDEADBEEF,
                     level: 1,
                     smallest_key: "apples".into(),
@@ -802,7 +800,7 @@ mod tests {
             ),
             (
                 SstMetadata {
-                    file_number: 4012,
+                    filenum: 4012,
                     file_size: (2 << 12) - 42,
                     level: 4,
                     smallest_key: "cherries".into(),
@@ -812,7 +810,7 @@ mod tests {
             ),
             (
                 SstMetadata {
-                    file_number: 10502,
+                    filenum: 10502,
                     file_size: (2u64 << 12) - 2222,
                     level: 5,
                     smallest_key: "oranges".into(),
@@ -822,12 +820,15 @@ mod tests {
             ),
         ]
         .map(|(sst, path_str)| {
-            let file_number = sst.file_number;
+            let file_number = sst.filenum;
             let level = sst.level;
             (
                 sst,
                 // deletion is determined by `file_number` and `level`
-                SstDeletion { file_number, level },
+                SstDeletion {
+                    filenum: file_number,
+                    level,
+                },
                 PathBuf::from(path_str),
             )
         });

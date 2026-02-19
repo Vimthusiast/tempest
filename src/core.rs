@@ -16,14 +16,6 @@ impl SeqNum {
     pub const START: Self = unsafe { Self::new_unchecked(16) };
     pub const MAX: Self = unsafe { Self::new_unchecked((1 << 56) - 1) };
 
-    pub(crate) const fn new(val: u64) -> Option<Self> {
-        if val > Self::MAX.get() {
-            return None;
-        }
-        // SAFETY: Just checked that `val` is never greater than 2^56-1
-        return Some(unsafe { Self::new_unchecked(val) });
-    }
-
     /// Creates a new `SeqNum` without verifying that it is within bounds.
     ///
     /// # Safety
@@ -39,10 +31,6 @@ impl SeqNum {
     #[inline]
     pub(crate) const fn get(&self) -> u64 {
         return self.0.get();
-    }
-
-    pub(crate) const fn increment(&self, rhs: u64) -> Option<Self> {
-        Self::new(self.get() + rhs)
     }
 }
 
