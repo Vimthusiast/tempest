@@ -88,6 +88,15 @@ impl FioFS for TokioFileSystem {
         tokio::fs::create_dir_all(path).await
     }
 
+    async fn sync_dir(&self, path: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            let file = tokio::fs::File::open(path).await?;
+            file.sync_all().await?;
+        }
+        Ok(())
+    }
+
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         tokio::fs::rename(from, to).await
     }

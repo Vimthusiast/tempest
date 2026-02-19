@@ -61,6 +61,10 @@ pub trait FioFS: Send + Sync + Clone {
     /// Recursively creates a directory and all of its parent components if they are missing.
     async fn create_dir_all(&self, path: &Path) -> io::Result<()>;
 
+    /// Sync a directory to disk to finalize any renames inside.
+    /// Only needed on Unix-based operating systems.
+    async fn sync_dir(&self, path: &Path) -> io::Result<()>;
+
     /// Rename a file, essentially moving it to another location.
     /// The path `to` may point to an existing file, which is then deleted.
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;

@@ -196,6 +196,10 @@ impl FioFS for VirtualFileSystem {
         Ok(())
     }
 
+    async fn sync_dir(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let from = Self::normalize(from);
         let to = Self::normalize(to);
@@ -312,6 +316,7 @@ mod tests {
         let old_path = Path::new("old.log");
         let new_path = Path::new("new.log");
 
+        // Create file
         vfs.create(old_path)
             .await
             .unwrap()
@@ -319,13 +324,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Rename
+        // Rename file and sync parent directory
         vfs.rename(old_path, new_path).await.unwrap();
+        vfs.sync_dir(&PathBuf::from("/")).await.unwrap();
 
-        // Old should be gone
+        // Old file should be gone
         assert!(vfs.open(old_path).await.is_err());
 
-        // New should have data
+        // New file should have data
         let mut file = vfs.open(new_path).await.unwrap();
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.unwrap();
