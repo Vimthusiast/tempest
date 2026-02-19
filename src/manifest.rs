@@ -902,8 +902,8 @@ mod tests {
                 println!("{:?}", lf);
             }
 
-            assert!(first_file_num < second_file_num);
-            assert!(second_file_num < third_file_num);
+            assert!(first_file_num + 1 == second_file_num);
+            assert!(second_file_num + 1 == third_file_num);
             assert_eq!(live_files.len(), 1);
             manifest_manager.shutdown().await.unwrap();
         }
