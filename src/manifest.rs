@@ -3,17 +3,20 @@ use std::{
     collections::HashSet,
     io,
     path::{Path, PathBuf},
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
+use arc_swap::ArcSwap;
 use bytes::{BufMut, BytesMut};
 use crc64::crc64;
 use futures::StreamExt;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
-    pin,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     core::SeqNum,
@@ -66,15 +69,15 @@ impl SstDeletion {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VersionEditV1 {
-    next_sequence_number: SeqNum,
-    next_file_number: u64,
+    next_seqnum: Option<SeqNum>,
+    next_file_number: Option<u64>,
     /// A list of new [`SstMetadata`] objects that register SST files to the [`Manifest`].
     added_ssts: Vec<SstMetadata>,
     removed_ssts: Vec<SstDeletion>,
 }
 
 /// A versioned list of all different version edits to the [`Manifest`].
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum VersionEdit {
     V1(VersionEditV1) = 1,
@@ -88,8 +91,16 @@ impl VersionEdit {
     }
 }
 
-#[derive(Default)]
-pub struct Manifest {}
+/// An immutable version of the manifest state.
+#[derive(Debug, Clone, Default)]
+pub struct ManifestVersion {
+    next_seqnum: SeqNum,
+    next_file_number: u64,
+    /// List of active SSTs on disk.
+    // TODO: Use Arc<[SstMetadata]> instead
+    ssts: Vec<SstMetadata>,
+    filepath: PathBuf,
+}
 
 /// This header comes first in a manifest file.
 #[derive(Debug)]
@@ -162,37 +173,72 @@ impl ManifestHeader {
 const MANIFEST_RECORD_PREFIX_SIZE: usize = 12;
 
 #[derive(Debug)]
+struct ManifestWriter<F: FioFS> {
+    #[debug("{}",type_name::<<F as FioFS>::File>())]
+    file: Pin<Box<<F as FioFS>::File>>,
+    #[debug("BytesMut(len = {}, cap = {})", scratch.len(), scratch.capacity())]
+    scratch: BytesMut,
+}
+
+const FILENUM_LIMIT_STEP: u64 = 100;
+const SEQNUM_LIMIT_STEP: u64 = 1000;
+
+#[derive(Debug)]
 pub struct ManifestManager<F: FioFS> {
-    // -- Manager Data --
-    root_dir: PathBuf,
-    manifest_dir: PathBuf,
-    current_file: PathBuf,
     #[debug("{}", type_name::<F>())]
     fs: F,
+    root_dir: PathBuf,
+    manifest_dir: PathBuf,
 
-    // -- Manifest Data --
-    next_sequence_number: SeqNum,
-    next_file_number: u64,
-    ssts: Vec<SstMetadata>,
+    current_version: ArcSwap<ManifestVersion>,
+    writer: tokio::sync::Mutex<Option<ManifestWriter<F>>>,
+
+    filenum_current: AtomicU64,
+    filenum_limit: AtomicU64,
+
+    seqnum_current: AtomicU64,
+    seqnum_limit: AtomicU64,
+
+    is_shutdown: AtomicBool,
+}
+
+macro_rules! assert_manifest_writer_guard {
+    ($self:ident, $writer_guard:expr) => {{
+        debug_assert!(
+            std::ptr::eq(tokio::sync::MutexGuard::mutex($writer_guard), &$self.writer),
+            "The provied MutexGuard does not belong to the right instance"
+        );
+    }};
 }
 
 impl<F: FioFS> ManifestManager<F> {
+    /// Initializes this Manifest Manager instance on the root directory `root_dir`, which is the
+    /// root of this [`Tempest`] instance.
+    ///
+    /// [`Tempest`]: crate::Tempest
     pub(crate) async fn init(fs: F, root_dir: impl Into<PathBuf>) -> io::Result<Self> {
         let root_dir = root_dir.into();
         let manifest_dir = root_dir.join("manifests");
         fs.create_dir_all(&manifest_dir).await?;
 
-        let mut res = Self {
+        let res = Self {
             root_dir,
             manifest_dir,
-            current_file: PathBuf::new(),
             fs,
 
-            next_sequence_number: SeqNum::START,
-            next_file_number: 0,
-            ssts: Vec::new(),
+            current_version: Default::default(),
+            writer: Default::default(),
+
+            filenum_current: 0.into(),
+            filenum_limit: 0.into(),
+
+            seqnum_current: SeqNum::START.get().into(),
+            seqnum_limit: SeqNum::START.get().into(),
+
+            is_shutdown: false.into(),
         };
 
+        // list and aggregate all files in manifest directory, skipping subdirectories
         let mut entries = Vec::new();
         let mut entry_stream = res.fs.read_dir(&res.manifest_dir).await?;
         while let Some(entry) = entry_stream.next().await {
@@ -210,6 +256,7 @@ impl<F: FioFS> ManifestManager<F> {
         // read in old files
         if entries.len() > 0 {
             println!("Looking through {} old manifest files", entries.len());
+            // aggregate all manifest file headers
             let mut files_with_header = Vec::new();
             for entry in entries {
                 println!("Reading manifest header for {:?}", entry.path());
@@ -222,60 +269,217 @@ impl<F: FioFS> ManifestManager<F> {
                 files_with_header.push((header, file));
             }
 
+            // get newest manifest file, ordered by file number in header
             let (header, file) = files_with_header
-                .iter_mut()
+                .into_iter()
                 .sorted_by_key(|(h, _f)| h.file_number)
                 .last()
                 .expect("we should have at least one file here");
+
+            // set the new file name
+            let mut writer_guard = res.writer.try_lock().expect("should not be locked yet");
+            res.swap_current_filename(res.manifest_dir.join(header.get_filename()), &writer_guard);
+            let writer = writer_guard.insert(ManifestWriter {
+                file,
+                scratch: BytesMut::with_capacity(4096),
+            });
+
+            // reapply commit log in manifest file
             println!("Reapplying manifest file {:?}", header.get_filename());
-            res.current_file = res.manifest_dir.join(header.get_filename());
-            res.decode_manifest_file_body(file).await?;
+            res.decode_manifest_file_body(&mut writer.file).await?;
             println!("Finished loading old data from {:?}", header.get_filename());
+            // update the initial offsets to the limit
+            let current_arc = res.current_version.load();
+            res.filenum_current
+                .store(current_arc.next_file_number, Ordering::SeqCst);
+            res.seqnum_current
+                .store(current_arc.next_seqnum.get(), Ordering::SeqCst);
         } else {
-            res.flush_to_new_file().await?;
+            // when there is no file, create one
+            let filenum = 0;
+            let filenum_limit = filenum + FILENUM_LIMIT_STEP;
+            res.filenum_current.store(filenum + 1, Ordering::SeqCst);
+            res.filenum_limit.store(filenum_limit, Ordering::SeqCst);
+
+            // lock the file writer
+            let mut writer_guard = res.writer.try_lock().expect("should not be locked yet");
+
+            // create the new file header
+            let header = ManifestHeader::new(filenum);
+            res.swap_current_filename(res.manifest_dir.join(header.get_filename()), &writer_guard);
+            let current_version = res.current_version.load();
+
+            // open file
+            let file = res.fs.create(&current_version.filepath).await?;
+            let file = Box::pin(file);
+
+            let writer = writer_guard.insert(ManifestWriter {
+                file,
+                scratch: BytesMut::with_capacity(4096),
+            });
+
+            // write header
+            let mut header_buf = [0u8; ManifestHeader::SIZE];
+            header.encode(&mut header_buf);
+            writer.file.write_all(&header_buf).await?;
+
+            // setup scratch buffer
+            let mut scratch = BytesMut::with_capacity(4096);
+
+            let edit = VersionEditV1 {
+                next_seqnum: Some(SeqNum::START),
+                next_file_number: Some(filenum + FILENUM_LIMIT_STEP),
+                added_ssts: Vec::new(),
+                removed_ssts: Vec::new(),
+            };
+
+            // write the first setup version edit
+            res.write_framed_edit(&mut writer.file, &mut scratch, &VersionEdit::V1(edit))
+                .await?;
+
+            // flush remaining bytes to file
+            writer.file.flush().await?;
+            writer.file.sync_all().await?;
         }
 
         Ok(res)
     }
 
-    pub async fn flush_to_new_file(&mut self) -> io::Result<()> {
-        let file_number = self.next_file_number;
-        self.next_file_number = file_number + 1;
+    pub(crate) async fn shutdown(&self) -> io::Result<()> {
+        let mut writer_guard = self.writer.lock().await;
+        if self
+            .is_shutdown
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Manifest manager has already been shut down",
+            ));
+        }
 
+        // get the exact current allocation limits
+        let final_seq = self
+            .seqnum_current
+            .load(Ordering::SeqCst)
+            .try_into()
+            .expect("checked in range");
+        let final_filenum = self.filenum_current.load(Ordering::SeqCst);
+
+        // create a final version edit, that tightens down the seqnum and filenum limits
+        let edit = VersionEdit::V1(VersionEditV1 {
+            next_seqnum: Some(final_seq),
+            next_file_number: Some(final_filenum),
+            added_ssts: Vec::new(),
+            removed_ssts: Vec::new(),
+        });
+
+        // write the final version edit
+        self.write_version_edit(edit, &mut writer_guard).await?;
+        Ok(())
+    }
+
+    fn swap_current_filename(
+        &self,
+        filename: PathBuf,
+        writer_guard: &tokio::sync::MutexGuard<'_, Option<ManifestWriter<F>>>,
+    ) {
+        assert_manifest_writer_guard!(self, writer_guard);
+        let current_arc = self.current_version.load();
+
+        let mut new_version = (**current_arc).clone();
+        new_version.filepath = filename;
+
+        self.current_version.store(new_version.into());
+    }
+
+    pub async fn flush_to_new_file(&self) -> io::Result<()> {
+        // obtain a file number for the new manifest file
+        // TODO: don't do this here, but after lock and wait with file writes for new file
+        let file_number = self.next_file_number().await?;
+
+        // lock all modifications
+        let mut writer_guard = self.writer.lock().await;
+
+        println!("Flushing to new file (#{})", file_number);
+
+        // get a snapshot of the current version after locking
+        let current_snapshot = self.current_version.load();
+
+        // create the header
         let header = ManifestHeader::new(file_number);
 
-        // setup scratch buffer
-        let mut scratch = BytesMut::with_capacity(4096);
-
         // there will only be one edit at first
-        let edit = VersionEditV1 {
-            next_sequence_number: self.next_sequence_number,
-            next_file_number: self.next_file_number,
-            added_ssts: self.ssts.clone(),
-            removed_ssts: vec![],
-        };
+        let edit = VersionEdit::V1(VersionEditV1 {
+            next_seqnum: Some(current_snapshot.next_seqnum),
+            next_file_number: Some(current_snapshot.next_file_number),
+            added_ssts: current_snapshot.ssts.clone(),
+            removed_ssts: Vec::new(),
+        });
 
-        // compute the new file path
-        self.current_file = self.manifest_dir.join(header.get_filename());
-        println!("Flushing manifest to new file {:?}", self.current_file);
+        // compute and update the new file path
+        self.swap_current_filename(self.manifest_dir.join(header.get_filename()), &writer_guard);
+        let current_arc = self.current_version.load();
+        println!("Flushing manifest to new file {:?}", current_arc.filepath);
 
-        // create the new file in fs
-        let file = self.fs.create(&self.current_file).await?;
-        pin!(file);
+        // get writer guard inner value
+        let writer = writer_guard.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Manifest writer not initialized")
+        })?;
+
+        // create the new file in fs and point the writer to it
+        let file = self.fs.create(&current_arc.filepath).await?;
+        let file = Box::pin(file);
+        writer.file = file;
 
         // write the header
         let mut header_buf = [0u8; ManifestHeader::SIZE];
         header.encode(&mut header_buf);
-        file.write(&header_buf).await?;
+        writer.file.write(&header_buf).await?;
 
         // write the first large setup version edit
-        self.write_framed_edit(&mut file, &mut scratch, &VersionEdit::V1(edit))
+        self.write_framed_edit(&mut writer.file, &mut writer.scratch, &edit)
             .await?;
 
         // flush remaining bytes to file
-        file.flush().await?;
-        file.sync_all().await?;
+        writer.file.flush().await?;
+        writer.file.sync_all().await?;
         Ok(())
+    }
+
+    fn apply_to_mem_and_swap(&self, edit: VersionEdit) {
+        let edit = edit.into_latest();
+        println!("Applying edit: {:?}", edit);
+        let current_arc = self.current_version.load();
+
+        let mut new_ssts = current_arc.ssts.clone();
+
+        new_ssts.extend(edit.added_ssts);
+
+        if !edit.removed_ssts.is_empty() {
+            let removed_ids: HashSet<u64> =
+                edit.removed_ssts.iter().map(|d| d.file_number).collect();
+            new_ssts.retain(|sst| !removed_ids.contains(&sst.file_number));
+        }
+
+        if let Some(next_seqnum) = edit.next_seqnum {
+            self.seqnum_limit.store(next_seqnum.get(), Ordering::SeqCst);
+        }
+
+        if let Some(next_filenum) = edit.next_file_number {
+            self.filenum_limit.store(next_filenum, Ordering::SeqCst);
+        }
+
+        let new_version = ManifestVersion {
+            next_seqnum: edit.next_seqnum.unwrap_or_else(|| current_arc.next_seqnum),
+            next_file_number: edit
+                .next_file_number
+                .unwrap_or_else(|| current_arc.next_file_number),
+            ssts: new_ssts,
+            filepath: current_arc.filepath.clone(),
+        };
+
+        self.current_version.store(Arc::new(new_version));
     }
 
     async fn write_framed_edit<W: AsyncWrite + Unpin + ?Sized>(
@@ -309,31 +513,21 @@ impl<F: FioFS> ManifestManager<F> {
     }
 
     pub async fn decode_manifest_file_body<R: AsyncRead + Unpin + ?Sized>(
-        &mut self,
+        &self,
         reader: &mut R,
     ) -> io::Result<()> {
         // read and apply the edits
         let mut scratch = Vec::new();
         while let Some(e) = Self::read_framed_edit(reader, &mut scratch).await? {
-            self.apply_edit(e);
+            self.apply_to_mem_and_swap(e);
         }
         Ok(())
-    }
-
-    fn apply_edit(&mut self, edit: VersionEditV1) {
-        println!("Applying edit: {:?}", edit);
-        self.next_sequence_number = edit.next_sequence_number;
-        self.next_file_number = edit.next_file_number;
-        self.ssts.extend(edit.added_ssts);
-        let removed_ids: HashSet<u64> = edit.removed_ssts.iter().map(|d| d.file_number).collect();
-        self.ssts
-            .retain(|sst| !removed_ids.contains(&sst.file_number));
     }
 
     async fn read_framed_edit<R: AsyncRead + Unpin + ?Sized>(
         reader: &mut R,
         scratch: &mut Vec<u8>,
-    ) -> io::Result<Option<VersionEditV1>> {
+    ) -> io::Result<Option<VersionEdit>> {
         let mut header_buf = [0u8; MANIFEST_RECORD_PREFIX_SIZE];
 
         // peek at the first byte, to see if we have a clean EOF
@@ -375,67 +569,188 @@ impl<F: FioFS> ManifestManager<F> {
         let edit: VersionEdit = bincode::deserialize(&scratch)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        let edit = edit.into_latest();
-
         Ok(Some(edit))
     }
 
-    async fn write_version_edit(&mut self, edit: VersionEditV1) -> io::Result<()> {
-        println!("Writing version edit {:?}", edit);
-        let mut scratch = BytesMut::with_capacity(4096);
-        let file = self.fs.open(&self.current_file).await?;
-        pin!(file);
-        file.seek(io::SeekFrom::End(0)).await?;
-        self.write_framed_edit(&mut file, &mut scratch, &VersionEdit::V1(edit))
+    async fn write_version_edit(
+        &self,
+        edit: VersionEdit,
+        writer_guard: &mut tokio::sync::MutexGuard<'_, Option<ManifestWriter<F>>>,
+    ) -> io::Result<()> {
+        assert_manifest_writer_guard!(self, writer_guard);
+        println!("Writing version edit {:?} on {:?}", edit, self);
+        println!("Writer guard: {:?}", writer_guard);
+        let writer = writer_guard.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Manifest writer not initialized")
+        })?;
+
+        // write into file, backed by in-mem scratch buffer
+        self.write_framed_edit(&mut writer.file, &mut writer.scratch, &edit)
             .await?;
+        self.apply_to_mem_and_swap(edit);
+
+        writer.file.flush().await?;
+        writer.file.sync_all().await?;
         println!("Finished writing version edit");
         Ok(())
     }
 
-    /// Allocate a new [`SeqNum`] range for outside usage, like KV-store inserts.
-    pub(crate) async fn seqnum_range(&mut self, size: u64) -> io::Result<std::ops::Range<SeqNum>> {
-        let next_seqnum = self.next_sequence_number;
-        self.next_sequence_number = self
-            .next_sequence_number
-            .increment(size)
-            // TODO: Create custom error type as TempestError variant
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "SeqNum overflow"))?;
+    async fn persist_seqnum_limit(
+        &self,
+        limit: SeqNum,
+        writer_guard: &mut tokio::sync::MutexGuard<'_, Option<ManifestWriter<F>>>,
+    ) -> io::Result<()> {
+        assert_manifest_writer_guard!(self, writer_guard);
 
-        let range = next_seqnum..self.next_sequence_number;
-        self.write_version_edit(VersionEditV1 {
-            next_sequence_number: self.next_sequence_number,
-            next_file_number: self.next_file_number,
+        let edit = VersionEdit::V1(VersionEditV1 {
+            next_seqnum: Some(limit),
+            next_file_number: None,
             added_ssts: Vec::new(),
             removed_ssts: Vec::new(),
-        })
-        .await?;
+        });
+        self.write_version_edit(edit, writer_guard).await?;
+        Ok(())
+    }
 
-        Ok(range)
+    async fn persist_filenum_limit(
+        &self,
+        limit: u64,
+        writer_guard: &mut tokio::sync::MutexGuard<'_, Option<ManifestWriter<F>>>,
+    ) -> io::Result<()> {
+        assert_manifest_writer_guard!(self, writer_guard);
+        let edit = VersionEdit::V1(VersionEditV1 {
+            next_seqnum: None,
+            next_file_number: Some(limit),
+            added_ssts: Vec::new(),
+            removed_ssts: Vec::new(),
+        });
+        self.write_version_edit(edit, writer_guard).await?;
+        Ok(())
+    }
+
+    /// Allocate a new [`SeqNum`] range for outside usage, like KV-store inserts.
+    pub(crate) async fn seqnum_range(&self, size: u64) -> io::Result<std::ops::Range<SeqNum>> {
+        loop {
+            // check for shutdown
+            if self.is_shutdown.load(Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Manifest manager has already been shut down",
+                ));
+            }
+            let current = self.seqnum_current.load(Ordering::Relaxed);
+            let limit = self.seqnum_limit.load(Ordering::Relaxed);
+
+            let new_current = current + size;
+
+            let current_seqnum = SeqNum::new(current).expect("checked in range");
+            let new_seqnum: SeqNum = new_current.try_into()?;
+
+            if new_current <= limit {
+                if self
+                    .seqnum_current
+                    .compare_exchange(current, new_current, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let range = current_seqnum..new_seqnum;
+                    return Ok(range);
+                }
+                continue;
+            }
+
+            // acquire exclusive lock for increasing the limit
+            let mut writer_guard = self.writer.lock().await;
+
+            // check for shutdown
+            if self.is_shutdown.load(Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Manifest manager has already been shut down",
+                ));
+            }
+
+            // another thread increased limit while acquiring lock
+            if self.seqnum_current.load(Ordering::Relaxed) + size
+                <= self.seqnum_limit.load(Ordering::Relaxed)
+            {
+                continue;
+            }
+
+            // calculate new limit, so it fits the new value
+            let new_limit = std::cmp::max(
+                limit + (SEQNUM_LIMIT_STEP * 2),
+                new_current + SEQNUM_LIMIT_STEP,
+            )
+            .try_into()?;
+
+            self.persist_seqnum_limit(new_limit, &mut writer_guard)
+                .await?;
+            self.seqnum_current
+                .store(new_seqnum.get(), Ordering::SeqCst);
+
+            let range = current_seqnum..new_seqnum;
+            return Ok(range);
+        }
     }
 
     /// Get a new file number, which is used for unique file names and ordering by time.
     /// This is a monotonically increasing function.
-    pub(crate) async fn next_file_number(&mut self) -> io::Result<u64> {
-        let next_file_number = self.next_file_number;
-        self.next_file_number += 1;
+    pub(crate) async fn next_file_number(&self) -> io::Result<u64> {
+        loop {
+            // check for shutdown
+            if self.is_shutdown.load(Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Manifest manager has already been shut down",
+                ));
+            }
+            let current = self.filenum_current.load(Ordering::Relaxed);
+            let limit = self.filenum_limit.load(Ordering::Relaxed);
 
-        self.write_version_edit(VersionEditV1 {
-            next_sequence_number: self.next_sequence_number,
-            next_file_number: self.next_file_number,
-            added_ssts: Vec::new(),
-            removed_ssts: Vec::new(),
-        })
-        .await?;
+            let new_current = current + 1;
 
-        Ok(next_file_number)
+            if new_current <= limit {
+                if self
+                    .filenum_current
+                    .compare_exchange(current, new_current, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return Ok(current);
+                }
+                continue;
+            }
+
+            let mut writer_guard = self.writer.lock().await;
+            // check for shutdown
+            if self.is_shutdown.load(Ordering::SeqCst) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Manifest manager has already been shut down",
+                ));
+            }
+
+            // another thread increased limit while acquiring lock
+            if self.filenum_current.load(Ordering::Relaxed) + 1
+                <= self.filenum_limit.load(Ordering::Relaxed)
+            {
+                continue;
+            }
+
+            let new_limit = limit + FILENUM_LIMIT_STEP;
+            self.persist_filenum_limit(new_limit, &mut writer_guard)
+                .await?;
+            self.filenum_current.store(new_current, Ordering::SeqCst);
+
+            return Ok(current);
+        }
     }
 
     pub(crate) fn all_live_files(&self) -> HashSet<PathBuf> {
+        let current_arc = self.current_version.load();
+
         let mut live = HashSet::new();
-
-        live.insert(self.current_file.clone());
-
-        for sst in &self.ssts {
+        live.insert(current_arc.filepath.clone());
+        for sst in &current_arc.ssts {
             live.insert(self.root_dir.join(sst.get_path()));
         }
 
@@ -519,29 +834,36 @@ mod tests {
 
         println!("Creating first manifest manager");
         {
-            let mut manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
-            first_range = manifest_manager.seqnum_range(24).await.unwrap();
+            let range_size = SEQNUM_LIMIT_STEP + 10;
+            let manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
+            first_range = manifest_manager.seqnum_range(range_size).await.unwrap();
             println!(
                 "First manifest manager final state: {:#?}",
                 manifest_manager
             );
-            assert_eq!(first_range.end.get() - first_range.start.get(), 24);
+            assert_eq!(first_range.end.get() - first_range.start.get(), range_size);
+            manifest_manager.shutdown().await.unwrap();
         }
 
         println!("Creating second manifest manager");
         {
-            let mut manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
-            second_range = manifest_manager.seqnum_range(24).await.unwrap();
+            let range_size = 100;
+            let manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
+            second_range = manifest_manager.seqnum_range(range_size).await.unwrap();
             println!(
                 "Second manifest manager final state: {:#?}",
                 manifest_manager
             );
-            assert_eq!(second_range.end.get() - second_range.start.get(), 24);
+            assert_eq!(
+                second_range.end.get() - second_range.start.get(),
+                range_size
+            );
+            manifest_manager.shutdown().await.unwrap();
         }
 
         println!("Creating third manifest manager");
         {
-            let mut manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
+            let manifest_manager = ManifestManager::init(fs.clone(), root_dir).await.unwrap();
             manifest_manager.flush_to_new_file().await.unwrap();
             let first_file_num = manifest_manager.next_file_number().await.unwrap();
             let second_file_num = manifest_manager.next_file_number().await.unwrap();
@@ -556,14 +878,17 @@ mod tests {
                 println!("{:?}", lf);
             }
 
-            assert_eq!(first_file_num + 1, second_file_num);
-            assert_eq!(second_file_num + 1, third_file_num);
+            assert!(first_file_num < second_file_num);
+            assert!(second_file_num < third_file_num);
             assert_eq!(live_files.len(), 1);
+            manifest_manager.shutdown().await.unwrap();
         }
 
-        assert_eq!(
-            first_range.end, second_range.start,
-            "Ranges should be continuous"
+        assert!(
+            first_range.end == second_range.start,
+            "seqnum ranges {:?} and {:?} should be continuous with graceful shutdowns!",
+            first_range,
+            second_range
         );
     }
 }

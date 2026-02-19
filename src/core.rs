@@ -1,3 +1,5 @@
+use std::io;
+
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
@@ -50,9 +52,19 @@ impl Default for SeqNum {
     }
 }
 
-impl Into<u64> for SeqNum {
-    fn into(self) -> u64 {
-        self.get()
+impl TryFrom<u64> for SeqNum {
+    // TODO: Use TempestError here
+    type Error = io::Error;
+
+    fn try_from(val: u64) -> Result<Self, Self::Error> {
+        if val > Self::MAX.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Value exceeds maximum SeqNum",
+            ));
+        }
+        // SAFETY: Just checked `val` is in valid range
+        Ok(unsafe { SeqNum::new_unchecked(val) })
     }
 }
 
