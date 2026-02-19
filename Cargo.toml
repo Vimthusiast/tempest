@@ -16,7 +16,7 @@ itertools = "0.14.0"
 logos = "0.16.1"
 nonmax = { version = "0.5.5", features = ["serde"] }
 num_enum = "0.7.5"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 strum = { version = "0.27.2", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time", "fs", "io-util"] }
 tokyo = "1.0.0"

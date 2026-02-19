@@ -16,7 +16,7 @@ use crc64::crc64;
 use futures::StreamExt;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     core::SeqNum,
@@ -71,12 +71,14 @@ impl SstDeletion {
 pub struct VersionEditV1 {
     next_seqnum: Option<SeqNum>,
     next_file_number: Option<u64>,
-    /// A list of new [`SstMetadata`] objects that register SST files to the [`Manifest`].
-    added_ssts: Vec<SstMetadata>,
-    removed_ssts: Vec<SstDeletion>,
+    /// A list of new [`SstMetadata`] objects that register SST files to the [`ManifestManager`].
+    added_ssts: Option<Arc<[SstMetadata]>>,
+    /// A list of removed [`SstMetadata`] objects, identified by their level and file ID,
+    /// that register SST files to the [`ManifestManager`].
+    removed_ssts: Option<Arc<[SstDeletion]>>,
 }
 
-/// A versioned list of all different version edits to the [`Manifest`].
+/// A versioned list of all different version edits to the [`ManifestManager`].
 #[derive(Debug, Serialize, Deserialize)]
 #[repr(u16)]
 pub enum VersionEdit {
@@ -91,22 +93,23 @@ impl VersionEdit {
     }
 }
 
-/// An immutable version of the manifest state.
-#[derive(Debug, Clone, Default)]
+/// An **immutable** version of the [`ManifestManager`]s internal state.
+#[derive(Debug, Clone)]
 pub struct ManifestVersion {
     next_seqnum: SeqNum,
     next_file_number: u64,
     /// List of active SSTs on disk.
     // TODO: Use Arc<[SstMetadata]> instead
-    ssts: Vec<SstMetadata>,
-    filepath: PathBuf,
+    ssts: Arc<[SstMetadata]>,
+    filepath: Arc<Path>,
 }
 
-/// This header comes first in a manifest file.
+/// As the [`ManifestManager`] creates log files on disk, this header comes first at the start.
+/// It encodes a static magic number, file ID, and checksum for those other bytes, so 24 bytes.
 #[derive(Debug)]
 pub struct ManifestHeader {
-    pub file_number: u64,
-    pub filename: PathBuf,
+    file_number: u64,
+    filename: PathBuf,
 }
 
 impl ManifestHeader {
@@ -124,6 +127,12 @@ impl ManifestHeader {
         }
     }
 
+    #[inline]
+    pub const fn file_number(&self) -> u64 {
+        self.file_number
+    }
+
+    #[inline]
     pub fn get_filename(&self) -> &Path {
         &self.filename
     }
@@ -226,7 +235,12 @@ impl<F: FioFS> ManifestManager<F> {
             manifest_dir,
             fs,
 
-            current_version: Default::default(),
+            current_version: ArcSwap::new(Arc::new(ManifestVersion {
+                next_seqnum: SeqNum::START,
+                next_file_number: 0,
+                ssts: Arc::new([]),
+                filepath: Arc::from(PathBuf::from("")),
+            })),
             writer: Default::default(),
 
             filenum_current: 0.into(),
@@ -278,7 +292,10 @@ impl<F: FioFS> ManifestManager<F> {
 
             // set the new file name
             let mut writer_guard = res.writer.try_lock().expect("should not be locked yet");
-            res.swap_current_filename(res.manifest_dir.join(header.get_filename()), &writer_guard);
+            res.swap_current_filename(
+                res.manifest_dir.join(header.get_filename()).into(),
+                &writer_guard,
+            );
             let writer = writer_guard.insert(ManifestWriter {
                 file,
                 scratch: BytesMut::with_capacity(4096),
@@ -286,7 +303,7 @@ impl<F: FioFS> ManifestManager<F> {
 
             // reapply commit log in manifest file
             println!("Reapplying manifest file {:?}", header.get_filename());
-            res.decode_manifest_file_body(&mut writer.file).await?;
+            res.decode_manifest_file_body(writer).await?;
             println!("Finished loading old data from {:?}", header.get_filename());
             // update the initial offsets to the limit
             let current_arc = res.current_version.load();
@@ -306,7 +323,10 @@ impl<F: FioFS> ManifestManager<F> {
 
             // create the new file header
             let header = ManifestHeader::new(filenum);
-            res.swap_current_filename(res.manifest_dir.join(header.get_filename()), &writer_guard);
+            res.swap_current_filename(
+                res.manifest_dir.join(header.get_filename()).into(),
+                &writer_guard,
+            );
             let current_version = res.current_version.load();
 
             // open file
@@ -323,18 +343,15 @@ impl<F: FioFS> ManifestManager<F> {
             header.encode(&mut header_buf);
             writer.file.write_all(&header_buf).await?;
 
-            // setup scratch buffer
-            let mut scratch = BytesMut::with_capacity(4096);
-
             let edit = VersionEditV1 {
                 next_seqnum: Some(SeqNum::START),
                 next_file_number: Some(filenum + FILENUM_LIMIT_STEP),
-                added_ssts: Vec::new(),
-                removed_ssts: Vec::new(),
+                added_ssts: None,
+                removed_ssts: None,
             };
 
             // write the first setup version edit
-            res.write_framed_edit(&mut writer.file, &mut scratch, &VersionEdit::V1(edit))
+            res.write_framed_edit(writer, &VersionEdit::V1(edit))
                 .await?;
 
             // flush remaining bytes to file
@@ -370,8 +387,8 @@ impl<F: FioFS> ManifestManager<F> {
         let edit = VersionEdit::V1(VersionEditV1 {
             next_seqnum: Some(final_seq),
             next_file_number: Some(final_filenum),
-            added_ssts: Vec::new(),
-            removed_ssts: Vec::new(),
+            added_ssts: None,
+            removed_ssts: None,
         });
 
         // write the final version edit
@@ -381,7 +398,7 @@ impl<F: FioFS> ManifestManager<F> {
 
     fn swap_current_filename(
         &self,
-        filename: PathBuf,
+        filename: Arc<Path>,
         writer_guard: &tokio::sync::MutexGuard<'_, Option<ManifestWriter<F>>>,
     ) {
         assert_manifest_writer_guard!(self, writer_guard);
@@ -413,12 +430,15 @@ impl<F: FioFS> ManifestManager<F> {
         let edit = VersionEdit::V1(VersionEditV1 {
             next_seqnum: Some(current_snapshot.next_seqnum),
             next_file_number: Some(current_snapshot.next_file_number),
-            added_ssts: current_snapshot.ssts.clone(),
-            removed_ssts: Vec::new(),
+            added_ssts: Some(current_snapshot.ssts.clone()),
+            removed_ssts: None,
         });
 
         // compute and update the new file path
-        self.swap_current_filename(self.manifest_dir.join(header.get_filename()), &writer_guard);
+        self.swap_current_filename(
+            self.manifest_dir.join(header.get_filename()).into(),
+            &writer_guard,
+        );
         let current_arc = self.current_version.load();
         println!("Flushing manifest to new file {:?}", current_arc.filepath);
 
@@ -438,8 +458,7 @@ impl<F: FioFS> ManifestManager<F> {
         writer.file.write(&header_buf).await?;
 
         // write the first large setup version edit
-        self.write_framed_edit(&mut writer.file, &mut writer.scratch, &edit)
-            .await?;
+        self.write_framed_edit(writer, &edit).await?;
 
         // flush remaining bytes to file
         writer.file.flush().await?;
@@ -452,13 +471,15 @@ impl<F: FioFS> ManifestManager<F> {
         println!("Applying edit: {:?}", edit);
         let current_arc = self.current_version.load();
 
-        let mut new_ssts = current_arc.ssts.clone();
+        let mut new_ssts = current_arc.ssts.to_vec();
+        if let Some(added_ssts) = edit.added_ssts {
+            new_ssts.extend(added_ssts.iter().cloned());
+        }
 
-        new_ssts.extend(edit.added_ssts);
-
-        if !edit.removed_ssts.is_empty() {
-            let removed_ids: HashSet<u64> =
-                edit.removed_ssts.iter().map(|d| d.file_number).collect();
+        if let Some(removed_ssts) = edit.removed_ssts
+            && !removed_ssts.is_empty()
+        {
+            let removed_ids: HashSet<u64> = removed_ssts.iter().map(|d| d.file_number).collect();
             new_ssts.retain(|sst| !removed_ids.contains(&sst.file_number));
         }
 
@@ -475,90 +496,93 @@ impl<F: FioFS> ManifestManager<F> {
             next_file_number: edit
                 .next_file_number
                 .unwrap_or_else(|| current_arc.next_file_number),
-            ssts: new_ssts,
+            ssts: new_ssts.into(),
             filepath: current_arc.filepath.clone(),
         };
 
         self.current_version.store(Arc::new(new_version));
     }
 
-    async fn write_framed_edit<W: AsyncWrite + Unpin + ?Sized>(
+    async fn write_framed_edit(
         &self,
-        writer: &mut W,
-        scratch: &mut BytesMut,
+        writer: &mut ManifestWriter<F>,
         edit: &VersionEdit,
     ) -> io::Result<()> {
         // clear the scratch buffer
-        scratch.clear();
+        writer.scratch.clear();
 
         // reserve space for the frame prefix
-        scratch.put_bytes(0, MANIFEST_RECORD_PREFIX_SIZE);
+        writer.scratch.put_bytes(0, MANIFEST_RECORD_PREFIX_SIZE);
 
         // create synchronous writer into scratch buffer
-        let mut sync_writer = scratch.writer();
+        let mut sync_writer = (&mut writer.scratch).writer();
 
         // serialize into scratch buffer writer
         bincode::serialize_into(&mut sync_writer, edit)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // calculate length and checksum and store in frame prefix
-        let data_len = (scratch.len() - MANIFEST_RECORD_PREFIX_SIZE) as u32;
-        let checksum = crc64(0, &scratch[MANIFEST_RECORD_PREFIX_SIZE..]);
-        scratch[0..4].copy_from_slice(&data_len.to_le_bytes());
-        scratch[4..12].copy_from_slice(&checksum.to_le_bytes());
+        let data_len = (writer.scratch.len() - MANIFEST_RECORD_PREFIX_SIZE) as u32;
+        let checksum = crc64(0, &writer.scratch[MANIFEST_RECORD_PREFIX_SIZE..]);
+        writer.scratch[0..4].copy_from_slice(&data_len.to_le_bytes());
+        writer.scratch[4..12].copy_from_slice(&checksum.to_le_bytes());
 
         // write the whole scratch buffer to the async writer at once
-        writer.write_all(&scratch).await?;
+        writer.file.write_all(&writer.scratch).await?;
         Ok(())
     }
 
-    pub async fn decode_manifest_file_body<R: AsyncRead + Unpin + ?Sized>(
+    pub async fn decode_manifest_file_body(
         &self,
-        reader: &mut R,
+        writer: &mut ManifestWriter<F>,
     ) -> io::Result<()> {
         // read and apply the edits
-        let mut scratch = Vec::new();
-        while let Some(e) = Self::read_framed_edit(reader, &mut scratch).await? {
+        while let Some(e) = Self::read_framed_edit(writer).await? {
             self.apply_to_mem_and_swap(e);
         }
         Ok(())
     }
 
-    async fn read_framed_edit<R: AsyncRead + Unpin + ?Sized>(
-        reader: &mut R,
-        scratch: &mut Vec<u8>,
-    ) -> io::Result<Option<VersionEdit>> {
+    async fn read_framed_edit(writer: &mut ManifestWriter<F>) -> io::Result<Option<VersionEdit>> {
         let mut header_buf = [0u8; MANIFEST_RECORD_PREFIX_SIZE];
 
         // peek at the first byte, to see if we have a clean EOF
-        let n = reader.read(&mut header_buf[..1]).await?;
+        let n = writer.file.read(&mut header_buf[..1]).await?;
         if n == 0 {
             // clean EOF, finished reading
             return Ok(None);
         }
 
         // try reading remaining header bytes
-        reader.read_exact(&mut header_buf[1..]).await.map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "Manifest truncated in header")
-        })?;
+        writer
+            .file
+            .read_exact(&mut header_buf[1..])
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Manifest truncated in header")
+            })?;
 
         // parse the header data
         let data_len = u32::from_le_bytes(header_buf[0..4].try_into().unwrap());
         let stored_checksum = u64::from_le_bytes(header_buf[4..12].try_into().unwrap());
 
-        // clear the scratch buffer
-        scratch.clear();
-        scratch.resize(data_len as usize, 0);
+        // clear the scratch buffer and fill to data_len
+        writer.scratch.clear();
+        writer.scratch.resize(data_len as usize, 0);
 
-        reader.read_exact(scratch).await.map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Manifest truncated in record body",
-            )
-        })?;
+        writer
+            .file
+            .read_exact(&mut writer.scratch)
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Manifest truncated in record body",
+                )
+            })?;
 
         // validate data with crc64 checksum
-        let computed_checksum = crc64(0, &scratch);
+        let computed_checksum = crc64(0, &writer.scratch);
         if stored_checksum != computed_checksum {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -566,7 +590,7 @@ impl<F: FioFS> ManifestManager<F> {
             ));
         }
 
-        let edit: VersionEdit = bincode::deserialize(&scratch)
+        let edit: VersionEdit = bincode::deserialize(&writer.scratch)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         Ok(Some(edit))
@@ -580,13 +604,12 @@ impl<F: FioFS> ManifestManager<F> {
         assert_manifest_writer_guard!(self, writer_guard);
         println!("Writing version edit {:?} on {:?}", edit, self);
         println!("Writer guard: {:?}", writer_guard);
-        let writer = writer_guard.as_mut().ok_or_else(|| {
+        let mut writer = writer_guard.as_mut().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "Manifest writer not initialized")
         })?;
 
         // write into file, backed by in-mem scratch buffer
-        self.write_framed_edit(&mut writer.file, &mut writer.scratch, &edit)
-            .await?;
+        self.write_framed_edit(&mut writer, &edit).await?;
         self.apply_to_mem_and_swap(edit);
 
         writer.file.flush().await?;
@@ -605,8 +628,8 @@ impl<F: FioFS> ManifestManager<F> {
         let edit = VersionEdit::V1(VersionEditV1 {
             next_seqnum: Some(limit),
             next_file_number: None,
-            added_ssts: Vec::new(),
-            removed_ssts: Vec::new(),
+            added_ssts: None,
+            removed_ssts: None,
         });
         self.write_version_edit(edit, writer_guard).await?;
         Ok(())
@@ -621,8 +644,8 @@ impl<F: FioFS> ManifestManager<F> {
         let edit = VersionEdit::V1(VersionEditV1 {
             next_seqnum: None,
             next_file_number: Some(limit),
-            added_ssts: Vec::new(),
-            removed_ssts: Vec::new(),
+            added_ssts: None,
+            removed_ssts: None,
         });
         self.write_version_edit(edit, writer_guard).await?;
         Ok(())
@@ -745,13 +768,13 @@ impl<F: FioFS> ManifestManager<F> {
         }
     }
 
-    pub(crate) fn all_live_files(&self) -> HashSet<PathBuf> {
+    pub(crate) fn all_live_files(&self) -> HashSet<Arc<Path>> {
         let current_arc = self.current_version.load();
 
         let mut live = HashSet::new();
         live.insert(current_arc.filepath.clone());
-        for sst in &current_arc.ssts {
-            live.insert(self.root_dir.join(sst.get_path()));
+        for sst in current_arc.ssts.iter() {
+            live.insert(self.root_dir.join(sst.get_path()).into());
         }
 
         live
