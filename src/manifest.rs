@@ -11,15 +11,14 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use crc64::crc64;
 use futures::StreamExt;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    core::SeqNum,
+    core::{MANIFEST_MAGICNUM, SeqNum},
     fio::{FioFS, FioFile},
 };
 
@@ -79,8 +78,8 @@ pub struct VersionEditV1 {
 }
 
 /// A versioned list of all different version edits to the [`ManifestManager`].
-#[derive(Debug, Serialize, Deserialize)]
 #[repr(u16)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum VersionEdit {
     V1(VersionEditV1) = 1,
 }
@@ -112,8 +111,7 @@ pub struct ManifestHeader {
 }
 
 impl ManifestHeader {
-    /// Magic number as a first check for file validation.
-    pub const MAGIC: &[u8; 8] = b"TMPS_MAN";
+    pub const MAGIC: &[u8; 8] = MANIFEST_MAGICNUM;
 
     /// Total size of the [`ManifestHeader`] after encoding.
     pub const SIZE: usize = 24;
@@ -138,7 +136,7 @@ impl ManifestHeader {
 
     pub fn encode(&self, buf: &mut [u8; Self::SIZE]) {
         // 1. Magic bytes
-        buf[0..8].copy_from_slice(Self::MAGIC);
+        buf[0..8].copy_from_slice(MANIFEST_MAGICNUM);
 
         // 2. Manifest ID / file number (little-endian)
         buf[8..16].copy_from_slice(&self.file_number.to_le_bytes());
@@ -151,13 +149,12 @@ impl ManifestHeader {
 
     pub fn decode(buf: &[u8; 24]) -> io::Result<Self> {
         let magic_bytes = &buf[0..8];
-        if magic_bytes != Self::MAGIC {
+        if magic_bytes != MANIFEST_MAGICNUM {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "Invalid magic number: not a manifest file. Expected {:?} but got {:?}.",
-                    Self::MAGIC,
-                    magic_bytes
+                    MANIFEST_MAGICNUM, magic_bytes
                 ),
             ));
         }
@@ -182,10 +179,11 @@ const MANIFEST_RECORD_PREFIX_SIZE: usize = 12;
 
 #[derive(Debug)]
 struct ManifestWriter<F: FioFS> {
+    /// The file we are writing to.
     #[debug("{}",type_name::<<F as FioFS>::File>())]
     file: Pin<Box<<F as FioFS>::File>>,
-    #[debug("BytesMut(len = {}, cap = {})", scratch.len(), scratch.capacity())]
-    scratch: BytesMut,
+    /// The current position in the file.
+    pos: u64,
 }
 
 const FILENUM_LIMIT_STEP: u64 = 100;
@@ -274,11 +272,19 @@ impl<F: FioFS> ManifestManager<F> {
             for entry in entries {
                 println!("Reading manifest header for {:?}", entry.path());
                 let file = res.fs.open(entry.path()).await?;
-                let mut file = Box::pin(file);
+                let file = Box::pin(file);
                 // read the header
-                let mut header_buf = [0u8; ManifestHeader::SIZE];
-                file.read_exact(&mut header_buf).await?;
-                let header = ManifestHeader::decode(&header_buf)?;
+                let header_buf = BytesMut::zeroed(ManifestHeader::SIZE);
+                let (res, header_buf) = file.read_exact_at(header_buf, 0).await;
+                if let Err(err) = res {
+                    eprintln!(
+                        "could not read manifest header for {:?}: {}",
+                        entry.path(),
+                        err
+                    );
+                    return Err(err);
+                }
+                let header = ManifestHeader::decode(header_buf.as_ref().try_into().unwrap())?;
                 files_with_header.push((header, file));
             }
 
@@ -295,27 +301,28 @@ impl<F: FioFS> ManifestManager<F> {
                 res.manifest_dir.join(header.get_filename()).into(),
                 &writer_guard,
             );
-            let writer = writer_guard.insert(ManifestWriter {
-                file,
-                scratch: BytesMut::with_capacity(4096),
-            });
+
+            // start decoding after header (already parsed above)
+            let pos = ManifestHeader::SIZE as u64;
+            let writer = writer_guard.insert(ManifestWriter { file, pos });
 
             // reapply commit log in manifest file
             println!("Reapplying manifest file {:?}", header.get_filename());
             res.decode_manifest_file_body(writer).await?;
             println!("Finished loading old data from {:?}", header.get_filename());
+
             // update the initial offsets to the limit
             let current_arc = res.current_version.load();
             res.filenum_current
-                .store(current_arc.filenum_limit, Ordering::SeqCst);
+                .store(current_arc.filenum_limit, Ordering::Release);
             res.seqnum_current
-                .store(current_arc.seqnum_limit.get(), Ordering::SeqCst);
+                .store(current_arc.seqnum_limit.get(), Ordering::Release);
         } else {
             // when there is no file, create one
             let filenum = 0;
             let filenum_limit = filenum + FILENUM_LIMIT_STEP;
-            res.filenum_current.store(filenum + 1, Ordering::SeqCst);
-            res.filenum_limit.store(filenum_limit, Ordering::SeqCst);
+            res.filenum_current.store(filenum + 1, Ordering::Release);
+            res.filenum_limit.store(filenum_limit, Ordering::Release);
 
             // lock the file writer
             let mut writer_guard = res.writer.try_lock().expect("should not be locked yet");
@@ -332,15 +339,16 @@ impl<F: FioFS> ManifestManager<F> {
             let file = res.fs.create(&current_version.filepath).await?;
             let file = Box::pin(file);
 
+            // write header
+            let mut header_buf = BytesMut::zeroed(ManifestHeader::SIZE);
+            header.encode(header_buf.as_mut().try_into().unwrap());
+            file.write_all_at(Bytes::from(header_buf), 0).await.0?;
+
             let writer = writer_guard.insert(ManifestWriter {
                 file,
-                scratch: BytesMut::with_capacity(4096),
+                // continue writing after header
+                pos: ManifestHeader::SIZE as u64,
             });
-
-            // write header
-            let mut header_buf = [0u8; ManifestHeader::SIZE];
-            header.encode(&mut header_buf);
-            writer.file.write_all(&header_buf).await?;
 
             let edit = VersionEditV1 {
                 seqnum_limit: Some(SeqNum::START),
@@ -353,8 +361,7 @@ impl<F: FioFS> ManifestManager<F> {
             res.write_framed_edit(writer, &VersionEdit::V1(edit))
                 .await?;
 
-            // flush remaining bytes to file
-            writer.file.flush().await?;
+            // sync all file metadata
             writer.file.sync_all().await?;
         }
 
@@ -365,7 +372,7 @@ impl<F: FioFS> ManifestManager<F> {
         let mut writer_guard = self.writer.lock().await;
         if self
             .is_shutdown
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
             .is_err()
         {
             return Err(io::Error::new(
@@ -377,10 +384,10 @@ impl<F: FioFS> ManifestManager<F> {
         // get the exact current allocation limits
         let final_seq = self
             .seqnum_current
-            .load(Ordering::SeqCst)
+            .load(Ordering::Acquire)
             .try_into()
             .expect("checked in range");
-        let final_filenum = self.filenum_current.load(Ordering::SeqCst);
+        let final_filenum = self.filenum_current.load(Ordering::Acquire);
 
         // create a final version edit, that tightens down the seqnum and filenum limits
         let edit = VersionEdit::V1(VersionEditV1 {
@@ -452,15 +459,16 @@ impl<F: FioFS> ManifestManager<F> {
         writer.file = file;
 
         // write the header
-        let mut header_buf = [0u8; ManifestHeader::SIZE];
-        header.encode(&mut header_buf);
-        writer.file.write(&header_buf).await?;
+        let mut header_buf = BytesMut::zeroed(ManifestHeader::SIZE);
+        header.encode(header_buf.as_mut().try_into().unwrap());
+        writer.file.write_all_at(header_buf.freeze(), 0).await.0?;
+        // advance writer past header
+        writer.pos = ManifestHeader::SIZE as u64;
 
         // write the first large setup version edit
         self.write_framed_edit(writer, &edit).await?;
 
-        // flush remaining bytes to file
-        writer.file.flush().await?;
+        // sync all file metadata
         writer.file.sync_all().await?;
         Ok(())
     }
@@ -483,11 +491,12 @@ impl<F: FioFS> ManifestManager<F> {
         }
 
         if let Some(next_seqnum) = edit.seqnum_limit {
-            self.seqnum_limit.store(next_seqnum.get(), Ordering::SeqCst);
+            self.seqnum_limit
+                .store(next_seqnum.get(), Ordering::Release);
         }
 
         if let Some(next_filenum) = edit.filenum_limit {
-            self.filenum_limit.store(next_filenum, Ordering::SeqCst);
+            self.filenum_limit.store(next_filenum, Ordering::Release);
         }
 
         let new_version = ManifestVersion {
@@ -509,78 +518,69 @@ impl<F: FioFS> ManifestManager<F> {
         writer: &mut ManifestWriter<F>,
         edit: &VersionEdit,
     ) -> io::Result<()> {
-        // clear the scratch buffer
-        writer.scratch.clear();
+        // create a buffer that will be written to disk
+        let mut buf = BytesMut::with_capacity(512);
 
         // reserve space for the frame prefix
-        writer.scratch.put_bytes(0, MANIFEST_RECORD_PREFIX_SIZE);
+        buf.put_bytes(0, MANIFEST_RECORD_PREFIX_SIZE);
 
         // create synchronous writer into scratch buffer
-        let mut sync_writer = (&mut writer.scratch).writer();
+        let sync_writer = (&mut buf).writer();
 
         // serialize into scratch buffer writer
-        bincode::serialize_into(&mut sync_writer, edit)
+        bincode::serialize_into(sync_writer, edit)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // calculate length and checksum and store in frame prefix
-        let data_len = (writer.scratch.len() - MANIFEST_RECORD_PREFIX_SIZE) as u32;
-        let checksum = crc64(0, &writer.scratch[MANIFEST_RECORD_PREFIX_SIZE..]);
-        writer.scratch[0..4].copy_from_slice(&data_len.to_le_bytes());
-        writer.scratch[4..12].copy_from_slice(&checksum.to_le_bytes());
+        let data_len = (buf.len() - MANIFEST_RECORD_PREFIX_SIZE) as u32;
+        let checksum = crc64(0, &buf[MANIFEST_RECORD_PREFIX_SIZE..]);
+        buf[0..4].copy_from_slice(&data_len.to_le_bytes());
+        buf[4..12].copy_from_slice(&checksum.to_le_bytes());
+
+        let final_len = buf.len() as u64;
 
         // write the whole scratch buffer to the async writer at once
-        writer.file.write_all(&writer.scratch).await?;
+        writer.file.write_all_at(buf.freeze(), writer.pos).await.0?;
+        // advance writer position past this record
+        writer.pos += final_len;
+
         Ok(())
     }
 
     async fn decode_manifest_file_body(&self, writer: &mut ManifestWriter<F>) -> io::Result<()> {
-        // read and apply the edits
-        while let Some(e) = Self::read_framed_edit(writer).await? {
-            self.apply_to_mem_and_swap(e);
+        // read and apply all edits in the manifest file body
+        let file_size = writer.file.size().await?;
+        while writer.pos < file_size {
+            let edit = Self::read_framed_edit(writer).await?;
+            self.apply_to_mem_and_swap(edit);
         }
         Ok(())
     }
 
-    async fn read_framed_edit(writer: &mut ManifestWriter<F>) -> io::Result<Option<VersionEdit>> {
-        let mut header_buf = [0u8; MANIFEST_RECORD_PREFIX_SIZE];
-
-        // peek at the first byte, to see if we have a clean EOF
-        let n = writer.file.read(&mut header_buf[..1]).await?;
-        if n == 0 {
-            // clean EOF, finished reading
-            return Ok(None);
-        }
-
-        // try reading remaining header bytes
-        writer
+    async fn read_framed_edit(writer: &mut ManifestWriter<F>) -> io::Result<VersionEdit> {
+        let mut current_read_pos = writer.pos;
+        // read the prefix
+        let prefix_buf = BytesMut::zeroed(MANIFEST_RECORD_PREFIX_SIZE);
+        let (res, prefix_buf) = writer
             .file
-            .read_exact(&mut header_buf[1..])
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "Manifest truncated in header")
-            })?;
+            .read_exact_at(prefix_buf, current_read_pos)
+            .await;
+        res?;
+        current_read_pos += MANIFEST_RECORD_PREFIX_SIZE as u64;
 
-        // parse the header data
-        let data_len = u32::from_le_bytes(header_buf[0..4].try_into().unwrap());
-        let stored_checksum = u64::from_le_bytes(header_buf[4..12].try_into().unwrap());
+        // parse the prefix data
+        let body_len = u32::from_le_bytes(prefix_buf[0..4].try_into().unwrap());
+        let stored_checksum = u64::from_le_bytes(prefix_buf[4..12].try_into().unwrap());
 
-        // clear the scratch buffer and fill to data_len
-        writer.scratch.clear();
-        writer.scratch.resize(data_len as usize, 0);
-
-        writer
-            .file
-            .read_exact(&mut writer.scratch)
-            .await
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Manifest truncated in record body",
-                )
-            })?;
+        // read the body
+        let body_buf = BytesMut::zeroed(body_len as usize);
+        let (res, body_buf) = writer.file.read_exact_at(body_buf, current_read_pos).await;
+        res?;
+        current_read_pos += body_len as u64;
 
         // validate data with crc64 checksum
-        let computed_checksum = crc64(0, &writer.scratch);
+        let body_buf = body_buf.freeze();
+        let computed_checksum = crc64(0, &body_buf);
         if stored_checksum != computed_checksum {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -588,10 +588,13 @@ impl<F: FioFS> ManifestManager<F> {
             ));
         }
 
-        let edit: VersionEdit = bincode::deserialize(&writer.scratch)
+        let edit: VersionEdit = bincode::deserialize(&body_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        Ok(Some(edit))
+        // advance the writer only when reading was successfull
+        writer.pos = current_read_pos;
+
+        Ok(edit)
     }
 
     async fn write_version_edit(
@@ -610,7 +613,7 @@ impl<F: FioFS> ManifestManager<F> {
         self.write_framed_edit(&mut writer, &edit).await?;
         self.apply_to_mem_and_swap(edit);
 
-        writer.file.flush().await?;
+        // sync all file metadata
         writer.file.sync_all().await?;
         println!("Finished writing version edit");
         Ok(())
@@ -622,7 +625,6 @@ impl<F: FioFS> ManifestManager<F> {
         writer_guard: &mut tokio::sync::MutexGuard<'_, Option<ManifestWriter<F>>>,
     ) -> io::Result<()> {
         assert_manifest_writer_guard!(self, writer_guard);
-
         let edit = VersionEdit::V1(VersionEditV1 {
             seqnum_limit: Some(limit),
             filenum_limit: None,
@@ -653,7 +655,7 @@ impl<F: FioFS> ManifestManager<F> {
     pub(crate) async fn seqnum_range(&self, size: u64) -> io::Result<std::ops::Range<SeqNum>> {
         loop {
             // check for shutdown
-            if self.is_shutdown.load(Ordering::SeqCst) {
+            if self.is_shutdown.load(Ordering::Acquire) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Manifest manager has already been shut down",
@@ -670,7 +672,7 @@ impl<F: FioFS> ManifestManager<F> {
             if new_current <= limit {
                 if self
                     .seqnum_current
-                    .compare_exchange(current, new_current, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(current, new_current, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
                     let range = current_seqnum..new_seqnum;
@@ -683,7 +685,7 @@ impl<F: FioFS> ManifestManager<F> {
             let mut writer_guard = self.writer.lock().await;
 
             // check for shutdown
-            if self.is_shutdown.load(Ordering::SeqCst) {
+            if self.is_shutdown.load(Ordering::Acquire) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Manifest manager has already been shut down",
@@ -707,7 +709,7 @@ impl<F: FioFS> ManifestManager<F> {
             self.persist_seqnum_limit(new_limit, &mut writer_guard)
                 .await?;
             self.seqnum_current
-                .store(new_seqnum.get(), Ordering::SeqCst);
+                .store(new_seqnum.get(), Ordering::Release);
 
             let range = current_seqnum..new_seqnum;
             return Ok(range);
@@ -719,7 +721,7 @@ impl<F: FioFS> ManifestManager<F> {
     pub(crate) async fn next_file_number(&self) -> io::Result<u64> {
         loop {
             // check for shutdown
-            if self.is_shutdown.load(Ordering::SeqCst) {
+            if self.is_shutdown.load(Ordering::Acquire) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Manifest manager has already been shut down",
@@ -733,7 +735,7 @@ impl<F: FioFS> ManifestManager<F> {
             if new_current <= limit {
                 if self
                     .filenum_current
-                    .compare_exchange(current, new_current, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(current, new_current, Ordering::Release, Ordering::Relaxed)
                     .is_ok()
                 {
                     return Ok(current);
@@ -743,7 +745,7 @@ impl<F: FioFS> ManifestManager<F> {
 
             let mut writer_guard = self.writer.lock().await;
             // check for shutdown
-            if self.is_shutdown.load(Ordering::SeqCst) {
+            if self.is_shutdown.load(Ordering::Acquire) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "Manifest manager has already been shut down",
@@ -760,7 +762,7 @@ impl<F: FioFS> ManifestManager<F> {
             let new_limit = limit + FILENUM_LIMIT_STEP;
             self.persist_filenum_limit(new_limit, &mut writer_guard)
                 .await?;
-            self.filenum_current.store(new_current, Ordering::SeqCst);
+            self.filenum_current.store(new_current, Ordering::Release);
 
             return Ok(current);
         }

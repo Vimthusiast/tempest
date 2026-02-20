@@ -10,12 +10,12 @@ use std::{
 
 use async_trait::async_trait;
 
-mod tokio_fio;
+mod uring_fio;
 mod virtual_fio;
 
+use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
-pub use tokio_fio::*;
+pub use uring_fio::*;
 pub use virtual_fio::*;
 
 pub struct FioDirEntry {
@@ -42,17 +42,23 @@ impl FioDirEntry {
 /// # File I/O File Trait
 ///
 /// A trait that abstracts asynchronous I/O from the file system.
-#[async_trait]
-pub trait FioFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin {
+#[async_trait(?Send)]
+pub trait FioFile: Unpin {
     async fn sync_all(&mut self) -> io::Result<()>;
     async fn size(&self) -> io::Result<u64>;
+
+    async fn read_exact_at(&self, buf: BytesMut, pos: u64) -> (io::Result<()>, BytesMut);
+    async fn write_all_at(&self, buf: Bytes, pos: u64) -> (io::Result<()>, Bytes);
 }
 
-#[async_trait]
-pub trait FioFS: Send + Sync + Clone {
+#[async_trait(?Send)]
+pub trait FioFS: Clone {
+    /// The representation of a single file in this file system.
     type File: FioFile;
 
-    /// Retrieve a [`Self::File`], which is just a thin handle.
+    /// Retrieve a [`Self::File`], which is just a thin handle, i.e. a [file descriptor].
+    ///
+    /// [file descriptor]: https://en.wikipedia.org/wiki/File_descriptor
     async fn open(&self, path: &Path) -> io::Result<Self::File>;
 
     /// Create a new [`Self::File`], returning the handle.
@@ -61,8 +67,7 @@ pub trait FioFS: Send + Sync + Clone {
     /// Recursively creates a directory and all of its parent components if they are missing.
     async fn create_dir_all(&self, path: &Path) -> io::Result<()>;
 
-    /// Sync a directory to disk to finalize any renames inside.
-    /// Only needed on Unix-based operating systems.
+    /// Sync a directory to disk to finalize any metadata changes inside, such as renames.
     async fn sync_dir(&self, path: &Path) -> io::Result<()>;
 
     /// Rename a file, essentially moving it to another location.

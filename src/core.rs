@@ -1,8 +1,17 @@
+//! This module contains core types that are used across Tempest.
 use std::io;
 
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
+
+/// Magic number for the manifest files, as a first check for file validation.
+/// Stored in the footer, at the end of an `*.sst` file.
+pub const SST_MAGICNUM: &[u8; 8] = b"TMPS_SST";
+
+/// Magic number for the manifest files, as a first check for file validation.
+/// Stored in the header, at the start of a `MANIFEST-*` file.
+pub const MANIFEST_MAGICNUM: &[u8; 8] = b"TMPS_MAN";
 
 #[derive(
     Debug, Display, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -57,6 +66,7 @@ impl TryFrom<u64> for SeqNum {
 }
 
 // These values are part of the file format and shall never be changed.
+#[repr(u8)]
 #[derive(
     Debug,
     Display,
@@ -70,7 +80,6 @@ impl TryFrom<u64> for SeqNum {
     IntoPrimitive,
     TryFromPrimitive,
 )]
-#[repr(u8)]
 pub enum KeyKind {
     Delete = 0,
     Set = 1,
