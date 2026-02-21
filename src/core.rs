@@ -9,13 +9,14 @@ use serde::{Deserialize, Serialize};
 /// Stored in the footer, at the end of an `*.sst` file.
 pub const SST_MAGICNUM: &[u8; 8] = b"TMPS_SST";
 
-/// Magic number for the manifest files, as a first check for file validation.
+/// Magic number for the silo manifest files, as a first check for file validation.
 /// Stored in the header, at the start of a `MANIFEST-*` file.
-pub const MANIFEST_MAGICNUM: &[u8; 8] = b"TMPS_MAN";
+pub const SILO_MANIFEST_MAGICNUM: &[u8; 8] = b"TMPS_MAN";
 
 #[derive(
     Debug, Display, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
+#[debug("SeqNum({_0})")]
 pub struct SeqNum(NonMaxU64);
 
 impl SeqNum {
@@ -51,14 +52,11 @@ impl Default for SeqNum {
 
 impl TryFrom<u64> for SeqNum {
     // TODO: Use TempestError here
-    type Error = io::Error;
+    type Error = TempestError;
 
     fn try_from(val: u64) -> Result<Self, Self::Error> {
         if val > Self::MAX.get() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Value exceeds maximum SeqNum",
-            ));
+            return Err(TempestError::SeqNumOverflow(val));
         }
         // SAFETY: Just checked `val` is in valid range
         Ok(unsafe { SeqNum::new_unchecked(val) })
@@ -110,3 +108,24 @@ impl KeyTrailer {
             .expect("key trailer should always have a valid kind")
     }
 }
+
+#[derive(Debug, Display, Error, From)]
+pub enum TempestError {
+    #[from(skip)]
+    #[display("Sequence number overflow: {_0} exceeds maximum allowed ({}).", SeqNum::MAX.get())]
+    SeqNumOverflow(#[error(not(source))] u64),
+
+    #[display("File number hard limit of 2^64 reached")]
+    FileNumOverflow,
+
+    #[display("I/O error: {}", _0)]
+    IoError(std::io::Error),
+
+    #[display("Failed to encode: {}", _0)]
+    BincodeError(bincode::Error),
+
+    #[display("Tempest error: {}", _0)]
+    Other(#[error(not(source))] &'static str),
+}
+
+pub type TempestResult<T> = Result<T, TempestError>;

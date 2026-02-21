@@ -13,8 +13,8 @@ use async_trait::async_trait;
 mod uring_fio;
 mod virtual_fio;
 
-use bytes::{Bytes, BytesMut};
 use futures::stream::BoxStream;
+use tokio_uring::buf::{BoundedBuf, BoundedBufMut};
 pub use uring_fio::*;
 pub use virtual_fio::*;
 
@@ -44,11 +44,11 @@ impl FioDirEntry {
 /// A trait that abstracts asynchronous I/O from the file system.
 #[async_trait(?Send)]
 pub trait FioFile: Unpin {
-    async fn sync_all(&mut self) -> io::Result<()>;
+    async fn sync_all(&self) -> io::Result<()>;
     async fn size(&self) -> io::Result<u64>;
 
-    async fn read_exact_at(&self, buf: BytesMut, pos: u64) -> (io::Result<()>, BytesMut);
-    async fn write_all_at(&self, buf: Bytes, pos: u64) -> (io::Result<()>, Bytes);
+    async fn read_exact_at<T: BoundedBufMut>(&self, buf: T, pos: u64) -> (io::Result<()>, T);
+    async fn write_all_at<T: BoundedBuf>(&self, buf: T, pos: u64) -> (io::Result<()>, T);
 }
 
 #[async_trait(?Send)]
@@ -59,10 +59,10 @@ pub trait FioFS: Clone {
     /// Retrieve a [`Self::File`], which is just a thin handle, i.e. a [file descriptor].
     ///
     /// [file descriptor]: https://en.wikipedia.org/wiki/File_descriptor
-    async fn open(&self, path: &Path) -> io::Result<Self::File>;
+    async fn open(&self, path: impl AsRef<Path>) -> io::Result<Self::File>;
 
     /// Create a new [`Self::File`], returning the handle.
-    async fn create(&self, path: &Path) -> io::Result<Self::File>;
+    async fn create(&self, path: impl AsRef<Path>) -> io::Result<Self::File>;
 
     /// Recursively creates a directory and all of its parent components if they are missing.
     async fn create_dir_all(&self, path: &Path) -> io::Result<()>;

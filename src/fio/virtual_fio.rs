@@ -6,12 +6,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::RwLock;
+use tokio_uring::buf::{BoundedBuf, BoundedBufMut};
 
 use crate::fio::{FioDirEntry, FioFS, FioFile};
 
+#[derive(Debug, Default)]
+#[debug("VirtualFile({:p})", Arc::as_ptr(_0))]
 pub struct VirtualFile(Arc<RwLock<Vec<u8>>>);
 
 impl VirtualFile {
@@ -22,7 +24,7 @@ impl VirtualFile {
 
 #[async_trait(?Send)]
 impl FioFile for VirtualFile {
-    async fn sync_all(&mut self) -> io::Result<()> {
+    async fn sync_all(&self) -> io::Result<()> {
         // No-op, virtual file-system is always synced, there is no buffering or syscall involved
         Ok(())
     }
@@ -32,11 +34,18 @@ impl FioFile for VirtualFile {
         Ok(data.len() as u64)
     }
 
-    async fn read_exact_at(&self, mut buf: BytesMut, pos: u64) -> (io::Result<()>, BytesMut) {
-        let data = self.0.read().await;
+    async fn read_exact_at<T: BoundedBufMut>(&self, mut buf: T, pos: u64) -> (io::Result<()>, T) {
+        let space = buf.bytes_init();
+
+        // no bytes to read
+        if space == 0 {
+            return (Ok(()), buf);
+        }
 
         let start = pos as usize;
-        let end = start + buf.len();
+        let end = start + space;
+
+        let data = self.0.read().await;
 
         if end > data.len() {
             return (
@@ -48,26 +57,41 @@ impl FioFile for VirtualFile {
             );
         }
 
-        buf.copy_from_slice(&data[start..end]);
+        buf.put_slice(&data[start..end]);
 
         (Ok(()), buf)
     }
 
-    async fn write_all_at(&self, buf: Bytes, pos: u64) -> (io::Result<()>, Bytes) {
-        if buf.len() == 0 {
+    async fn write_all_at<T: BoundedBuf>(&self, buf: T, pos: u64) -> (io::Result<()>, T) {
+        let len = buf.bytes_init();
+        if len == 0 {
             return (Ok(()), buf);
         }
 
         let mut data = self.0.write().await;
 
         let start = pos as usize;
-        let end = start + buf.len();
+        let end = match start.checked_add(len) {
+            Some(e) => e,
+            None => {
+                return (
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Position overflow",
+                    )),
+                    buf,
+                );
+            }
+        };
 
         if data.len() < end {
             data.resize(end, 0);
         }
 
-        data[start..end].copy_from_slice(&buf);
+        // SAFETY: We got the initialized `len` of `buf` above.
+        let src_slice = unsafe { std::slice::from_raw_parts(buf.stable_ptr(), len) };
+
+        data[start..end].copy_from_slice(&src_slice);
 
         (Ok(()), buf)
     }
@@ -75,6 +99,7 @@ impl FioFile for VirtualFile {
 
 #[derive(Debug, Clone, Default)]
 pub struct VirtualFileSystem {
+    #[debug("{:p}", Arc::as_ptr(files))]
     files: Arc<RwLock<BTreeMap<PathBuf, Arc<RwLock<Vec<u8>>>>>>,
 }
 
@@ -116,8 +141,10 @@ impl VirtualFileSystem {
 impl FioFS for VirtualFileSystem {
     type File = VirtualFile;
 
-    async fn open(&self, path: &Path) -> io::Result<Self::File> {
+    async fn open(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
+        let path = path.as_ref();
         let path = Self::normalize(path);
+        trace!("Opening file {:?}", path);
         let files = self.files.read().await;
         let data = files
             .get(&path)
@@ -126,9 +153,10 @@ impl FioFS for VirtualFileSystem {
         Ok(VirtualFile::new(data.clone()))
     }
 
-    async fn create(&self, path: &Path) -> io::Result<Self::File> {
+    async fn create(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
+        let path = path.as_ref();
         let path = Self::normalize(path);
-        println!("Creating file {:?}", path);
+        trace!("Creating file {:?}", path);
         let mut files = self.files.write().await;
         let data = Arc::new(RwLock::new(Vec::new()));
         files.insert(path, data.clone());
@@ -136,19 +164,21 @@ impl FioFS for VirtualFileSystem {
         Ok(VirtualFile::new(data))
     }
 
-    async fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
+    async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         // No-op, virtual file-system is has no hierarchy, so we don't manage any directory entries
+        trace!("Creating directory {:?}", path);
         Ok(())
     }
 
-    async fn sync_dir(&self, _path: &Path) -> io::Result<()> {
+    async fn sync_dir(&self, path: &Path) -> io::Result<()> {
+        trace!("Syncing directory {:?}", path);
         Ok(())
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let from = Self::normalize(from);
         let to = Self::normalize(to);
-        println!("Renaming file {:?} to {:?}", from, to);
+        trace!("Renaming file {:?} to {:?}", from, to);
         let mut files = self.files.write().await;
         let data = files
             .remove(&from)
@@ -163,7 +193,7 @@ impl FioFS for VirtualFileSystem {
         path: &Path,
     ) -> io::Result<BoxStream<'static, io::Result<FioDirEntry>>> {
         let search_path = Self::normalize(path);
-        println!("Reading directory {:?}", search_path);
+        trace!("Reading directory {:?}", search_path);
         let mut prefix = search_path.to_string_lossy().into_owned();
         if !prefix.ends_with('/') {
             prefix.push('/');
@@ -205,6 +235,8 @@ impl FioFS for VirtualFileSystem {
 
 #[cfg(test)]
 mod tests {
+    use bytes::{Bytes, BytesMut};
+
     use super::*;
     use crate::fio::{FioFS, FioFile};
 

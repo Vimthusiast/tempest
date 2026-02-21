@@ -1,19 +1,20 @@
 use std::{io, path::Path};
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
 use futures::{
     StreamExt,
     stream::{self, BoxStream},
 };
+use tokio_uring::buf::{BoundedBuf, BoundedBufMut};
 
 use crate::fio::{FioDirEntry, FioFS, FioFile};
 
+#[derive(Debug)]
 pub struct UringFile(tokio_uring::fs::File);
 
 #[async_trait(?Send)]
 impl FioFile for UringFile {
-    async fn sync_all(&mut self) -> io::Result<()> {
+    async fn sync_all(&self) -> io::Result<()> {
         self.0.sync_all().await
     }
 
@@ -22,16 +23,16 @@ impl FioFile for UringFile {
         Ok(statx.stx_size)
     }
 
-    async fn read_exact_at(&self, buf: BytesMut, pos: u64) -> (io::Result<()>, BytesMut) {
+    async fn read_exact_at<T: BoundedBufMut>(&self, buf: T, pos: u64) -> (io::Result<()>, T) {
         self.0.read_exact_at(buf, pos).await
     }
 
-    async fn write_all_at(&self, buf: Bytes, pos: u64) -> (io::Result<()>, Bytes) {
+    async fn write_all_at<T: BoundedBuf>(&self, buf: T, pos: u64) -> (io::Result<()>, T) {
         self.0.write_all_at(buf, pos).await
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct UringFileSystem;
 
 impl UringFileSystem {
@@ -44,7 +45,8 @@ impl UringFileSystem {
 impl FioFS for UringFileSystem {
     type File = UringFile;
 
-    async fn open(&self, path: &Path) -> io::Result<Self::File> {
+    async fn open(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
+        let path = path.as_ref();
         let file = tokio_uring::fs::OpenOptions::new()
             .write(true)
             .open(path)
@@ -52,7 +54,8 @@ impl FioFS for UringFileSystem {
         Ok(UringFile(file))
     }
 
-    async fn create(&self, path: &Path) -> io::Result<Self::File> {
+    async fn create(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
+        let path = path.as_ref();
         let file = tokio_uring::fs::OpenOptions::new()
             .create_new(true)
             .open(path)
