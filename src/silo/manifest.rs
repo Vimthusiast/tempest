@@ -245,6 +245,10 @@ pub(super) struct ManifestResponse {
 /// that triggers a rotation of the manifest file.
 const SILO_MANIFEST_GROWTH_FACTOR: u64 = 2;
 
+/// The minimum file size required before growth.
+/// The growth factor does not matter when below this baseline.
+const SILO_MANIFEST_GROWTH_BASELINE: u64 = 8 * 1024 * 1024; // 8 MiB
+
 /// Manages reads and writes to the manifest of a silo.
 #[derive(Debug)]
 pub(super) struct SiloManifest<F: FioFS> {
@@ -393,8 +397,6 @@ impl<F: FioFS> SiloManifest<F> {
                     }
                 }
 
-                let initial_file_size = file.size().await?;
-
                 let mut res = Self {
                     silo_root,
                     manifest_dir,
@@ -405,7 +407,7 @@ impl<F: FioFS> SiloManifest<F> {
 
                     current_file: file,
                     current_filepos,
-                    initial_file_size,
+                    initial_file_size: current_filepos,
 
                     seqnum_current: seqnum_limit,
                     seqnum_limit,
@@ -454,8 +456,7 @@ impl<F: FioFS> SiloManifest<F> {
 
         file.sync_all().await?;
 
-        // arbitrary size (small anyways)
-        let initial_file_size = 1024;
+        let initial_file_size = filepos;
 
         let filenum_current = filenum + 1;
         Ok(Self {
@@ -503,7 +504,7 @@ impl<F: FioFS> SiloManifest<F> {
         Ok(())
     }
 
-    pub(super) async fn write_to_new_file(&mut self) -> TempestResult<()> {
+    async fn write_to_new_file(&mut self) -> TempestResult<()> {
         assert!(!self.is_shutdown, "Silo has been shut down");
         let (filenum_range, filenum_limit) = self.calculate_filenum_range(1)?;
         let filenum = filenum_range.start;
@@ -529,6 +530,7 @@ impl<F: FioFS> SiloManifest<F> {
 
         let bytes_written = res?;
         self.current_filepos = bytes_written;
+        self.initial_file_size = bytes_written;
 
         file.sync_all().await?;
 
@@ -740,7 +742,24 @@ impl<F: FioFS> SiloManifest<F> {
         }
     }
 
-    pub(super) async fn request(
+    async fn maybe_rotate(&mut self) -> TempestResult<()> {
+        let threshold = std::cmp::max(
+            self.initial_file_size * SILO_MANIFEST_GROWTH_FACTOR,
+            SILO_MANIFEST_GROWTH_BASELINE,
+        );
+
+        if self.current_filepos > threshold {
+            trace!(
+                current = self.current_filepos,
+                threshold, "Rotating manifest file"
+            );
+            self.write_to_new_file().await?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn handle_request(
         &mut self,
         req: ManifestRequest,
     ) -> TempestResult<ManifestResponse> {
@@ -775,6 +794,10 @@ impl<F: FioFS> SiloManifest<F> {
         self.seqnum_current = seqnum_range.end;
         self.filenum_current = filenum_range.end;
 
+        // rotate file when surpassing threshold
+        self.maybe_rotate().await?;
+
+        // apply the manifest state edit to memory
         self.apply_edit(edit);
 
         Ok(ManifestResponse {
@@ -829,7 +852,7 @@ mod tests {
                 let mut manifest = SiloManifest::init(fs.clone(), silo_root.clone()).await?;
                 let seqnums_needed = 10;
                 let response = manifest
-                    .request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
+                    .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
                     .await?;
                 first_seqnum_range = response.seqnum_range;
                 manifest.shutdown().await?;
@@ -847,7 +870,7 @@ mod tests {
                 // simulate big seqnum request
                 let seqnums_needed = SEQNUM_LIMIT_STEP * 3 / 2 + 10;
                 let resp = manifest
-                    .request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
+                    .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
                     .await?;
                 second_seqnum_range = resp.seqnum_range;
                 manifest.shutdown().await?;
