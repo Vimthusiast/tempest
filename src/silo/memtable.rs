@@ -6,7 +6,7 @@ use crate::base::{Comparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
 
 #[derive(Debug, Default)]
 pub(super) struct MemTable<C: Comparer> {
-    map: BTreeMap<InternalKey<Bytes, C>, Bytes>,
+    map: BTreeMap<InternalKey<C>, Bytes>,
 }
 
 // [main key (prefix)][8 bytes timestamp]:
@@ -18,7 +18,7 @@ impl<C: Comparer> MemTable<C> {
         Default::default()
     }
 
-    pub(super) fn insert(&mut self, key: InternalKey<Bytes, C>, value: Bytes) {
+    pub(super) fn insert(&mut self, key: InternalKey<C>, value: Bytes) {
         trace!(
             key_kind = ?key.trailer().kind(), key_len = key.key().len(),
             key=?key.key(), ?value, seqnum=key.trailer().seqnum().get(),

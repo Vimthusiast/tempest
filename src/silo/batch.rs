@@ -3,18 +3,45 @@ use integer_encoding::VarInt;
 
 use crate::base::{KeyKind, SeqNum};
 
-/// Header:
-/// - 8 bytes seqnum
-/// - 4 bytes count
+/// # Write Batch
 ///
-/// Body:
-/// - Record[]
+/// This defines an aggregation of different write operations into the silo.
 ///
-/// Record:
-/// - KeyKind::Delete   varstring
-/// - KeyKind::Put      varstring   varstring
+/// Every batch starts with a header of the following layout:
+///
+/// ```not_rust
+/// +-------------+------------+--- ... ---+
+/// | SeqNum (8B) | Count (4B) |  Entries  |
+/// +-------------+------------+--- ... ---+
+/// ```
+///
+/// As you can see, after the 12 byte header, there can be up to `u32::MAX` (Count) **Entries**.
+///
+///
+/// There are different entry types, each identified by the [`KeyKind`].
+/// Every entry is encoded as the kind, followed by 1 or 2 **varstrings**, depending on the kind.
+/// A varstring is a length-prefixed string, where the length itself is also encoded as a varint.
+///
+/// ```not_rust
+/// +-----------+-----------------+-------------------+
+/// | Kind (1B) | Key (varstring) | Value (varstring) |
+/// +-----------+-----------------+-------------------+
+/// ```
+///
+/// "Key -> Value" is not always a good description. While [`KeyKind::Put`] does set a `Key` to a
+/// `Value`, other operations, like range deletions, actually just have two keys as their params.
+///
+/// The following table shows the format for entries of each [`KeyKind`]:
+///
+/// ```not_rust
+/// Delete      varstring
+/// Put         varstring   varstring
+// -- TODO --
+// RangeDelete
+// merging operations
+/// ```
 #[derive(Debug)]
-pub(crate) struct WriteBatch {
+pub struct WriteBatch {
     #[debug("BytesMut(len={},cap={})", buf.len(), buf.capacity())]
     buf: BytesMut,
     count: u32,
@@ -62,7 +89,7 @@ impl WriteBatch {
         self.buf.put(key);
     }
 
-    fn put_varint(&mut self, i: usize) {
+    pub(crate) fn put_varint(&mut self, i: usize) {
         // reserve space
         let varint_size = i.required_space();
         self.buf.put_bytes(0, varint_size);
@@ -72,14 +99,14 @@ impl WriteBatch {
         debug_assert_eq!(written, varint_size);
     }
 
-    pub fn commit(&mut self, seqnum: SeqNum) {
+    pub(crate) fn commit(&mut self, seqnum: SeqNum) {
         assert!(!self.committed);
         self.buf[0..8].copy_from_slice(&seqnum.get().to_le_bytes());
         self.buf[8..12].copy_from_slice(&self.count.to_le_bytes());
         self.committed = true;
     }
 
-    pub fn take_buf(self) -> BytesMut {
+    pub(crate) fn take_buf(self) -> BytesMut {
         assert!(
             self.committed,
             "Trying to access a write batch, that was not assigned a seqnum."

@@ -1,6 +1,8 @@
+//! This module contains the trait abstraction for key comparison within Tempests storage layer.
+
 use std::cmp;
 
-pub trait Comparer: Default + 'static {
+pub trait Comparer: Default + Clone + 'static {
     /// Returns the index where the version suffix starts.
     /// If there is no suffix, returns the length of the slice.
     fn split(&self, key: &[u8]) -> usize;
@@ -24,7 +26,7 @@ pub trait Comparer: Default + 'static {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct DefaultComparer;
 
 impl Comparer for DefaultComparer {
@@ -41,7 +43,7 @@ impl Comparer for DefaultComparer {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AssertComparer<C: Comparer>(C);
 
 impl<C: Comparer> Comparer for AssertComparer<C> {

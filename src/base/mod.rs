@@ -1,15 +1,27 @@
 //! This module contains base types that are used across Tempest.
+//!
+//! - [`SeqNum`]: A sequence number new-type, since they are 56 bits, due to bit-packing.
+//! - [`KeyKind`]: A one-byte key-kind that identifies different operations in our storage layer.
+//! - [`KeyTrailer`]: This type packs the [`SeqNum`] in the higher 7 bytes, with [`KeyKind`] at the
+//!   lowest byte. Ordering by it therefore prioritizes the sequence number over the kind.
+//! - [`InternalKey`]: This is the key representation that our storage layer uses. It implements
+//!   custom ordering through the [`Comparer`] trait, allowing for key suffixes that encode custom
+//!   data. Tempest uses the suffix for [`HlcTimestamp`]s, to allow ordering of data across silos.
+
 use std::{cmp, marker::PhantomData};
 
+use bytes::Bytes;
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 
 pub mod comparer;
 pub mod error;
+pub mod hlc;
 
 pub use comparer::*;
 pub use error::*;
+pub use hlc::*;
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.
@@ -124,15 +136,15 @@ impl KeyTrailer {
     }
 }
 
-#[derive(Debug)]
-pub struct InternalKey<K: AsRef<[u8]>, C: Comparer = DefaultComparer> {
-    key: K,
+#[derive(Debug, Clone)]
+pub struct InternalKey<C: Comparer = DefaultComparer> {
+    key: Bytes,
     trailer: KeyTrailer,
     _marker: PhantomData<C>,
 }
 
-impl<K: AsRef<[u8]>, C: Comparer> InternalKey<K, C> {
-    pub(crate) fn new(key: K, trailer: KeyTrailer) -> Self {
+impl<C: Comparer> InternalKey<C> {
+    pub(crate) fn new(key: Bytes, trailer: KeyTrailer) -> Self {
         Self {
             key,
             trailer,
@@ -144,26 +156,41 @@ impl<K: AsRef<[u8]>, C: Comparer> InternalKey<K, C> {
         self.trailer
     }
 
-    pub(crate) fn key(&self) -> &K {
+    pub(crate) fn key(&self) -> &Bytes {
         &self.key
+    }
+
+    /// Generate an internal key for testing other parts of Tempest.
+    #[cfg(test)]
+    pub(crate) fn test(id: u64) -> Self {
+        let user_key = Bytes::from(id.to_be_bytes().to_vec());
+        Self::new(user_key, KeyTrailer(0))
+    }
+
+    // Test helper that gets the key as an easily comparable `u64` value.
+    #[cfg(test)]
+    pub(crate) fn user_key_as_u64(&self) -> u64 {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(self.key.as_ref());
+        u64::from_be_bytes(buf)
     }
 }
 
-impl<K: AsRef<[u8]>, C: Comparer> cmp::PartialEq for InternalKey<K, C> {
+impl<C: Comparer> cmp::PartialEq for InternalKey<C> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other).is_eq()
     }
 }
 
-impl<K: AsRef<[u8]>, C: Comparer> cmp::Eq for InternalKey<K, C> {}
+impl<C: Comparer> cmp::Eq for InternalKey<C> {}
 
-impl<K: AsRef<[u8]>, C: Comparer> cmp::PartialOrd for InternalKey<K, C> {
+impl<C: Comparer> cmp::PartialOrd for InternalKey<C> {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<K: AsRef<[u8]>, C: Comparer> cmp::Ord for InternalKey<K, C> {
+impl<C: Comparer> cmp::Ord for InternalKey<C> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         let c = C::default();
 

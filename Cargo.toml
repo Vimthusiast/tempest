@@ -20,7 +20,7 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 strum = { version = "0.27.2", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time", "fs", "io-util"] }
 tokio-uring = { version = "0.5.0", features = ["bytes"] }
-tracing = "0.1.44"
+tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
 zerocopy = { version = "0.8.39", features = ["derive", "std"] }
 
 [dev-dependencies]

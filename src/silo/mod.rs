@@ -1,3 +1,14 @@
+//! # Module Silo
+//!
+//! This module contains the code for our **storage silos**.
+//!
+//! ## What are silos
+//!
+//! Tempest is designed with the shared-nothing approach, where we try to avoid having any
+//! resources requiring multi-thread synchronization primitives. This improves overall
+//! **performance** and allows us to utilize certain Linux kernel features, such as **io_uring**,
+//! which is bound to be used on one thread by implementation, i.e. most types are !Send.
+
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
@@ -13,9 +24,11 @@ use bytes::{Buf, Bytes};
 use integer_encoding::VarInt;
 use tracing::instrument;
 
-mod batch;
-mod manifest;
-mod memtable;
+pub mod batch;
+pub mod iterator;
+pub mod manifest;
+pub mod memtable;
+pub mod wal;
 
 #[derive(Debug)]
 pub(crate) struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
@@ -173,7 +186,7 @@ impl<F: FioFS, C: Comparer> Drop for Silo<F, C> {
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
-    use tracing::Level;
+    use tracing::{Instrument, Level};
 
     use crate::{fio::VirtualFileSystem, tests::setup_tracing};
 
@@ -182,81 +195,81 @@ mod tests {
     #[test]
     fn test_silo() {
         setup_tracing();
-        if let Err(err) = tokio_uring::start(async {
-            let id = 0;
-            let silo_dir = "silo-0";
-            let fs = VirtualFileSystem::new();
 
-            let kvs = {
-                let mut res = vec![
-                    (b"key0".as_ref(), b"value0".as_ref()),
-                    (b"key1".as_ref(), b"value1".as_ref()),
-                    (b"key2".as_ref(), b"value2".as_ref()),
-                    (b"key3".as_ref(), b"value3".as_ref()),
-                    (b"key4".as_ref(), b"value4".as_ref()),
-                    (b"key5".as_ref(), b"value5".as_ref()),
-                ];
-                res.sort_by_key(|&(k, _v)| k);
-                res
-            };
+        let id = 0;
+        let silo_span = span!(Level::INFO, "silo", id);
+        let silo_dir = "silo-0";
+        let fs = VirtualFileSystem::new();
+        if let Err(err) = tokio_uring::start(
+            async {
+                let kvs = {
+                    let mut res = vec![
+                        (b"key0".as_ref(), b"value0".as_ref()),
+                        (b"key1".as_ref(), b"value1".as_ref()),
+                        (b"key2".as_ref(), b"value2".as_ref()),
+                        (b"key3".as_ref(), b"value3".as_ref()),
+                        (b"key4".as_ref(), b"value4".as_ref()),
+                        (b"key5".as_ref(), b"value5".as_ref()),
+                    ];
+                    res.sort_by_key(|&(k, _v)| k);
+                    res
+                };
 
-            // enter span
-            let silo_span = span!(Level::INFO, "silo", id);
-            let _enter = silo_span.enter();
+                {
+                    // initialize silo
+                    let mut silo: Silo<_, DefaultComparer> =
+                        Silo::init(id, fs.clone(), silo_dir).await?;
 
-            {
-                // initialize silo
-                let mut silo: Silo<_, DefaultComparer> =
-                    Silo::init(id, fs.clone(), silo_dir).await?;
-
-                // create batched insert
-                let mut batch = WriteBatch::new_in(BytesMut::with_capacity(4096));
-                for (k, v) in &kvs {
-                    batch.put(k, v);
-                }
-
-                // write batch
-                silo.write(batch).await?;
-
-                // shut down silo
-                silo.shutdown().await?;
-                info!("First silo after shutdown: {:#?}", silo);
-            }
-
-            {
-                // initialize silo
-                let mut silo: Silo<_, DefaultComparer> =
-                    Silo::init(id, fs.clone(), silo_dir).await?;
-
-                // create batched insert
-                let mut batch = WriteBatch::new_in(BytesMut::with_capacity(4096));
-
-                // delete every second kv pair
-                for (i, &(k, _v)) in kvs.iter().enumerate() {
-                    if i % 2 == 0 {
-                        batch.delete(k);
-                    };
-                }
-
-                // write batch
-                silo.write(batch).await?;
-
-                // check that delete was successful
-                for (i, &(k, _v)) in kvs.iter().enumerate() {
-                    if i % 2 == 0 {
-                        // TODO: use silo interface instead of accessing memtable
-                        let found_value = silo.get(k.into(), silo.highest_seqnum()).await?;
-                        assert!(found_value.is_none());
+                    // create batched insert
+                    let mut batch = WriteBatch::new_in(BytesMut::with_capacity(4096));
+                    for (k, v) in &kvs {
+                        batch.put(k, v);
                     }
+
+                    // write batch
+                    silo.write(batch).await?;
+
+                    // shut down silo
+                    silo.shutdown().await?;
+                    info!("First silo after shutdown: {:#?}", silo);
                 }
 
-                // shut down silo
-                silo.shutdown().await?;
-                info!("Second silo after shutdown: {:#?}", silo);
-            }
+                {
+                    // initialize silo
+                    let mut silo: Silo<_, DefaultComparer> =
+                        Silo::init(id, fs.clone(), silo_dir).await?;
 
-            Ok::<(), TempestError>(())
-        }) {
+                    // create batched insert
+                    let mut batch = WriteBatch::new_in(BytesMut::with_capacity(4096));
+
+                    // delete every second kv pair
+                    for (i, &(k, _v)) in kvs.iter().enumerate() {
+                        if i % 2 == 0 {
+                            batch.delete(k);
+                        };
+                    }
+
+                    // write batch
+                    silo.write(batch).await?;
+
+                    // check that delete was successful
+                    for (i, &(k, _v)) in kvs.iter().enumerate() {
+                        if i % 2 == 0 {
+                            // TODO: use silo interface instead of accessing memtable
+                            let found_value = silo.get(k.into(), silo.highest_seqnum()).await?;
+                            assert!(found_value.is_none());
+                        }
+                    }
+
+                    // shut down silo
+                    silo.shutdown().await?;
+                    info!("Second silo after shutdown: {:#?}", silo);
+                }
+
+                Ok::<(), TempestError>(())
+            }
+            .instrument(silo_span),
+        ) {
             error!("Silo test failed: {}", err);
             panic!("{}", err);
         }
