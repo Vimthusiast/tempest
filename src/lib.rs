@@ -5,7 +5,6 @@ extern crate derive_more;
 extern crate tracing;
 
 pub mod base;
-pub mod errors;
 pub mod fio;
 pub mod silo;
 

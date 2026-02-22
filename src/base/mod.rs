@@ -2,8 +2,14 @@
 use std::{cmp, marker::PhantomData};
 
 use nonmax::NonMaxU64;
-use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
+
+pub mod comparer;
+pub mod error;
+
+pub use comparer::*;
+pub use error::*;
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.
@@ -118,107 +124,6 @@ impl KeyTrailer {
     }
 }
 
-pub trait Comparer: Default + 'static {
-    /// Returns the index where the version suffix starts.
-    /// If there is no suffix, returns the length of the slice.
-    fn split(&self, key: &[u8]) -> usize;
-
-    /// Compares the prefix part of two keys.
-    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
-
-    /// Compares the suffix part of two keys.
-    fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
-
-    /// This function is used to compare two different keys.
-    /// It first compares them ascending by the prefix, and then ascending by the suffix.
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        let anon = self.split(a);
-        let bnon = self.split(b);
-
-        match self.compare_prefix(&a[..anon], &b[..bnon]) {
-            cmp::Ordering::Equal => self.compare_suffix(&a[anon..], &b[bnon..]),
-            ord => ord,
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct DefaultComparer;
-
-impl Comparer for DefaultComparer {
-    fn split(&self, key: &[u8]) -> usize {
-        key.len()
-    }
-
-    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        a.cmp(b)
-    }
-
-    fn compare_suffix(&self, _a: &[u8], _b: &[u8]) -> cmp::Ordering {
-        cmp::Ordering::Equal
-    }
-}
-
-#[derive(Default)]
-pub struct AssertComparer<C: Comparer>(C);
-
-impl<C: Comparer> Comparer for AssertComparer<C> {
-    fn split(&self, key: &[u8]) -> usize {
-        self.0.split(key)
-    }
-
-    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        self.0.compare_prefix(a, b)
-    }
-
-    fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        self.0.compare_suffix(a, b)
-    }
-
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        // compare the two keys completely (prefix and suffix)
-        let res = self.0.compare(a, b);
-
-        // check for anti-symmetry:
-        // `a == b` implies `b == a`
-        // `a > b` implies `b < a`
-        // `a < b` implies `b > a`
-        debug_assert_eq!(
-            res,
-            self.0.compare(b, a).reverse(),
-            "Anti-symmetry violation: compare(a,b) != reverse(compare(b,a))"
-        );
-
-        // check for consistency with prefix:
-        // if a < b, then prefix(a) must be <= prefix(b)
-        let split_a = self.0.split(a);
-        let split_b = self.0.split(b);
-        let prefix_cmp = a[..split_a].cmp(&b[..split_b]);
-
-        match prefix_cmp {
-            cmp::Ordering::Less => {
-                debug_assert_eq!(
-                    res,
-                    cmp::Ordering::Less,
-                    "Consistency violation: prefix(a) < prefix(b) but a >= b"
-                )
-            }
-            cmp::Ordering::Greater => {
-                debug_assert_eq!(
-                    res,
-                    cmp::Ordering::Greater,
-                    "Consistency violation: prefix(a) > prefix(b) but a <= b"
-                )
-            }
-            cmp::Ordering::Equal => {
-                // only suffix comparison matters here
-            }
-        }
-
-        res
-    }
-}
-
 #[derive(Debug)]
 pub struct InternalKey<K: AsRef<[u8]>, C: Comparer = DefaultComparer> {
     key: K,
@@ -268,30 +173,3 @@ impl<K: AsRef<[u8]>, C: Comparer> cmp::Ord for InternalKey<K, C> {
         }
     }
 }
-
-#[derive(Debug, Display, Error, From)]
-pub enum TempestError {
-    #[from(skip)]
-    #[display("Sequence number overflow: {_0} exceeds maximum allowed ({}).", SeqNum::MAX.get())]
-    SeqNumOverflow(#[error(not(source))] u64),
-
-    #[display("File number hard limit of 2^64 reached")]
-    FileNumOverflow,
-
-    #[display("I/O error: {}", _0)]
-    IoError(std::io::Error),
-
-    #[display("Failed to encode: {}", _0)]
-    BincodeError(bincode::Error),
-
-    #[display("Tempest error: {}", _0)]
-    Other(#[error(not(source))] &'static str),
-
-    #[display("Invalid key kind: {}", _0.number)]
-    InvalidKeyKind(TryFromPrimitiveError<KeyKind>),
-
-    #[display("Invalid Varint: Failed to decode.")]
-    InvalidVarint,
-}
-
-pub type TempestResult<T> = Result<T, TempestError>;
