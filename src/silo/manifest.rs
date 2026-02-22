@@ -10,7 +10,7 @@ use futures::{FutureExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    core::{SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult},
+    base::{SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult},
     fio::{FioFS, FioFile},
 };
 
@@ -262,7 +262,7 @@ pub(super) struct SiloManifest<F: FioFS> {
 
     /// A scratch buffer that is used for encoding and passed to FS writes.
     #[debug("{}", scratch.as_ref()
-        .map(|b| format!("Some(BytesMut(len={}, cap={}))", b.len(), b.capacity()))
+        .map(|b| format!("Some(BytesMut(len={},cap={}))", b.len(), b.capacity()))
         .unwrap_or_else(|| format!("None")))]
     scratch: Option<BytesMut>,
 
@@ -454,10 +454,10 @@ impl<F: FioFS> SiloManifest<F> {
         let (res, scratch) = Self::write_to_file(&file, scratch, filenum, &initial_edit).await;
         let filepos = res?;
 
+        // sync file for durability
         file.sync_all().await?;
 
         let initial_file_size = filepos;
-
         let filenum_current = filenum + 1;
         Ok(Self {
             fs,
@@ -496,11 +496,18 @@ impl<F: FioFS> SiloManifest<F> {
         // write the final edit
         self.append_framed_edit(&final_edit).await?;
 
+        // sync file for durability
         self.current_file.sync_all().await?;
 
+        // mark instance as shut down
         self.is_shutdown = true;
-        info!("Silo manifest shut down cleanly");
 
+        // NB: Technically, we don't have to set these, since the instance was shut down,
+        // but for debugging purposes and to prevent potential issues, we still do
+        self.seqnum_limit = self.seqnum_current;
+        self.filenum_limit = self.filenum_current;
+
+        info!("Silo manifest shut down cleanly");
         Ok(())
     }
 
@@ -542,7 +549,9 @@ impl<F: FioFS> SiloManifest<F> {
         Ok(())
     }
 
-    /// Returns the number of bytes written and the scratch buffer.
+    /// Creates a new manifest file with the ID `filenum` and writes all current state to it.
+    /// Note that, while we do write to the file, we don't `fsync` in any way, so the caller is
+    /// responsible. Returns the number of bytes written and the used scratch buffer.
     async fn write_to_file(
         file: &<F as FioFS>::File,
         mut scratch: BytesMut,
@@ -763,6 +772,7 @@ impl<F: FioFS> SiloManifest<F> {
         &mut self,
         req: ManifestRequest,
     ) -> TempestResult<ManifestResponse> {
+        let mut requires_write = false;
         let mut edit = ManifestEditV1 {
             seqnum_limit: None,
             filenum_limit: None,
@@ -772,38 +782,68 @@ impl<F: FioFS> SiloManifest<F> {
 
         if !req.ssts_added.is_empty() {
             edit.ssts_added = Some(req.ssts_added);
+            requires_write = true;
         }
 
         if !req.ssts_removed.is_empty() {
             edit.ssts_removed = Some(req.ssts_removed);
+            requires_write = true;
         }
 
         let (seqnum_range, new_seqnum_limit) = self.calculate_seqnum_range(req.seqnums_needed)?;
         edit.seqnum_limit = new_seqnum_limit;
+        if edit.seqnum_limit.is_some() {
+            requires_write = true;
+        }
 
         let (filenum_range, new_filenum_limit) =
             self.calculate_filenum_range(req.filenums_needed)?;
         edit.filenum_limit = new_filenum_limit;
+        if edit.filenum_limit.is_some() {
+            requires_write = true;
+        }
 
-        // write edit to disk
-        let edit = ManifestEdit::V1(edit);
-        self.append_framed_edit(&edit).await?;
-        self.current_file.sync_all().await?;
+        if requires_write {
+            // write edit to disk
+            let edit = ManifestEdit::V1(edit);
+            self.append_framed_edit(&edit).await?;
+            self.current_file.sync_all().await?;
 
-        // update `current_*` on successful disk commit
+            // rotate file when surpassing threshold
+            self.maybe_rotate().await?;
+
+            // apply the manifest state edit to memory
+            self.apply_edit(edit);
+        }
+
+        // update `current_*` on successful commit
         self.seqnum_current = seqnum_range.end;
         self.filenum_current = filenum_range.end;
-
-        // rotate file when surpassing threshold
-        self.maybe_rotate().await?;
-
-        // apply the manifest state edit to memory
-        self.apply_edit(edit);
 
         Ok(ManifestResponse {
             seqnum_range,
             filenum_range,
         })
+    }
+
+    pub(super) async fn get_seqnums(&mut self, n: u64) -> TempestResult<std::ops::Range<SeqNum>> {
+        let (range, new_limit) = self.calculate_seqnum_range(n)?;
+        if new_limit.is_some() {
+            // Slow path: we have to write a new limit to disk
+            let resp = self
+                .handle_request(ManifestRequest::new().with_seqnums_needed(n))
+                .await?;
+            Ok(resp.seqnum_range)
+        } else {
+            // Fast path: just bump the current pointer
+            self.seqnum_current = range.end;
+            Ok(range)
+        }
+    }
+
+    /// Returns the next sequence number that will be used.
+    pub(super) const fn seqnum_current(&self) -> SeqNum {
+        self.seqnum_current
     }
 }
 

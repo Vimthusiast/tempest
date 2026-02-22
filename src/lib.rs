@@ -4,10 +4,9 @@ extern crate derive_more;
 #[macro_use]
 extern crate tracing;
 
-pub mod core;
+pub mod base;
 pub mod errors;
 pub mod fio;
-pub mod kv;
 pub mod silo;
 
 pub struct Tempest;
