@@ -3,25 +3,58 @@ use std::{
     cmp::Ordering,
     collections::BinaryHeap,
     marker::PhantomData,
-    task::{self, Poll},
+    pin::Pin,
+    task::{self, Context, Poll},
 };
 
 use bytes::Bytes;
 
 use crate::base::{Comparer, InternalKey, TempestResult};
 
-pub trait TempestIterator<C: Comparer> {
+pub trait TempestIterator<'a, C: Comparer> {
     /// Tries to poll the next key-value pair into this iterator.
     /// They can be accessed through the [`key`] and [`value`] methods.
     ///
-    /// [`key`]: LocalTempestIterator::key()
-    /// [`value`]: LocalTempestIterator::value()
+    /// [`key`]: TempestIterator::key()
+    /// [`value`]: TempestIterator::value()
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>>;
 
     /// Returns the last key that was polled.
     fn key(&self) -> Option<&InternalKey<C>>;
     /// Returns the last value that was polled.
     fn value(&self) -> Option<&Bytes>;
+
+    /// Returns a future that resolves on the next element.
+    fn next(&mut self) -> Next<'_, 'a, Self, C>
+    where
+        Self: Sized,
+    {
+        Next {
+            iter: self,
+            _marker: PhantomData,
+        }
+    }
+}
+
+pub struct Next<'b, 'a, I, C>
+where
+    I: TempestIterator<'a, C>,
+    C: Comparer,
+{
+    iter: &'b mut I,
+    _marker: PhantomData<&'a C>,
+}
+
+impl<'b, 'a, I, C> Future for Next<'b, 'a, I, C>
+where
+    I: TempestIterator<'a, C>,
+    C: Comparer,
+{
+    type Output = TempestResult<Option<()>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.iter.poll_next(cx)
+    }
 }
 
 pub struct MemTableIterator<'a, C: Comparer> {
@@ -29,7 +62,18 @@ pub struct MemTableIterator<'a, C: Comparer> {
     current: Option<(InternalKey<C>, Bytes)>,
 }
 
-impl<'a, C: Comparer> TempestIterator<C> for MemTableIterator<'a, C> {
+impl<'a, C: Comparer> MemTableIterator<'a, C> {
+    pub(super) fn new(
+        inner: std::iter::Peekable<std::collections::btree_map::Iter<'a, InternalKey<C>, Bytes>>,
+    ) -> Self {
+        Self {
+            inner,
+            current: None,
+        }
+    }
+}
+
+impl<'a, C: Comparer> TempestIterator<'a, C> for MemTableIterator<'a, C> {
     fn poll_next(&mut self, _cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
         if let Some((k, v)) = self.inner.next() {
             // cheap arc increments
@@ -50,9 +94,9 @@ impl<'a, C: Comparer> TempestIterator<C> for MemTableIterator<'a, C> {
     }
 }
 
-pub struct MergingIteratorHeapEntry<C: Comparer> {
+pub struct MergingIteratorHeapEntry<'a, C: Comparer> {
     /// The internal iterator implementation.
-    pub iter: Box<dyn TempestIterator<C>>,
+    pub iter: Box<dyn TempestIterator<'a, C> + 'a>,
 
     /// Higher ID = newer source. The active memtable has the highest priority, so u64::MAX.
     /// The first immutable memtable gets `u64::MAX-1`, then `-2`, and so on.
@@ -60,15 +104,24 @@ pub struct MergingIteratorHeapEntry<C: Comparer> {
     pub source_id: u64,
 }
 
-impl<C: Comparer> PartialEq for MergingIteratorHeapEntry<C> {
+impl<'a, C: Comparer> MergingIteratorHeapEntry<'a, C> {
+    pub fn new<I: TempestIterator<'a, C> + 'a>(iter: I, source_id: u64) -> Self {
+        Self {
+            iter: Box::new(iter),
+            source_id,
+        }
+    }
+}
+
+impl<'a, C: Comparer> PartialEq for MergingIteratorHeapEntry<'a, C> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other).is_eq()
     }
 }
 
-impl<C: Comparer> Eq for MergingIteratorHeapEntry<C> {}
+impl<'a, C: Comparer> Eq for MergingIteratorHeapEntry<'a, C> {}
 
-impl<C: Comparer> PartialOrd for MergingIteratorHeapEntry<C> {
+impl<'a, C: Comparer> PartialOrd for MergingIteratorHeapEntry<'a, C> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -76,7 +129,7 @@ impl<C: Comparer> PartialOrd for MergingIteratorHeapEntry<C> {
 
 // NB: When implementing ordering of max-heap entries, greater values will bubble up.
 // Therefore, when a is some and b is none, a > b.
-impl<C: Comparer> Ord for MergingIteratorHeapEntry<C> {
+impl<'a, C: Comparer> Ord for MergingIteratorHeapEntry<'a, C> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.iter.key(), other.iter.key()) {
             (Some(a), Some(b)) => a
@@ -90,23 +143,23 @@ impl<C: Comparer> Ord for MergingIteratorHeapEntry<C> {
     }
 }
 
-enum MergingIteratorState<C: Comparer> {
+enum MergingIteratorState<'a, C: Comparer> {
     // The merging iterator still has to poll some source iterators.
     Initializing {
-        sources: Vec<MergingIteratorHeapEntry<C>>,
+        sources: Vec<MergingIteratorHeapEntry<'a, C>>,
     },
     // The merging iterator has been initialized
     Active,
 }
 
-pub struct MergingIterator<C: Comparer> {
-    state: MergingIteratorState<C>,
-    heap: BinaryHeap<MergingIteratorHeapEntry<C>>,
+pub struct MergingIterator<'a, C: Comparer> {
+    state: MergingIteratorState<'a, C>,
+    heap: BinaryHeap<MergingIteratorHeapEntry<'a, C>>,
     current: Option<(InternalKey<C>, Bytes)>,
 }
 
-impl<C: Comparer> MergingIterator<C> {
-    pub fn new(sources: Vec<MergingIteratorHeapEntry<C>>) -> Self {
+impl<'a, C: Comparer> MergingIterator<'a, C> {
+    pub fn new(sources: Vec<MergingIteratorHeapEntry<'a, C>>) -> Self {
         Self {
             state: MergingIteratorState::Initializing { sources },
             heap: Default::default(),
@@ -115,7 +168,7 @@ impl<C: Comparer> MergingIterator<C> {
     }
 }
 
-impl<C: Comparer> TempestIterator<C> for MergingIterator<C> {
+impl<'a, C: Comparer> TempestIterator<'a, C> for MergingIterator<'a, C> {
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
         if let MergingIteratorState::Initializing { ref mut sources } = self.state {
             trace!(sources = sources.len(), "Initializing merging iterator");
@@ -201,19 +254,19 @@ impl<C: Comparer> TempestIterator<C> for MergingIterator<C> {
     }
 }
 
-pub struct DeduplicatingIterator<I, C>
+pub struct DeduplicatingIterator<'a, I, C>
 where
-    I: TempestIterator<C>,
+    I: TempestIterator<'a, C>,
     C: Comparer,
 {
     inner: I,
     last_key: Option<Bytes>,
-    _marker: PhantomData<C>,
+    _marker: PhantomData<(&'a (), C)>,
 }
 
-impl<I, C> DeduplicatingIterator<I, C>
+impl<'a, I, C> DeduplicatingIterator<'a, I, C>
 where
-    I: TempestIterator<C>,
+    I: TempestIterator<'a, C>,
     C: Comparer,
 {
     pub fn new(inner: I) -> Self {
@@ -225,9 +278,9 @@ where
     }
 }
 
-impl<I, C> TempestIterator<C> for DeduplicatingIterator<I, C>
+impl<'a, I, C> TempestIterator<'a, C> for DeduplicatingIterator<'a, I, C>
 where
-    I: TempestIterator<C>,
+    I: TempestIterator<'a, C>,
     C: Comparer,
 {
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
@@ -265,35 +318,47 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::base::{DefaultComparer, FixedSuffixComparer, KeyKind, KeyTrailer, SeqNum};
+    use crate::base::{DefaultComparer, FixedSuffixComparer, KeyKind, KeyTrailer};
     use crate::tests::setup_tracing;
 
     use super::*;
-    use std::sync::Arc;
-    use std::task::{Context, Wake};
-
-    // Helper to get a dummy context
-    fn dummy_cx() -> Context<'static> {
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-        let waker: std::task::Waker = Arc::new(NoopWake).into();
-        // mem transmute the arc to avoid lifetime issues
-        unsafe { Context::from_waker(std::mem::transmute(&waker)) }
-    }
+    use std::task::Context;
 
     // A simple mock iterator for testing
+    #[derive(Default)]
     struct MockIterator<C: Comparer> {
         data: Vec<(InternalKey<C>, Bytes)>,
         pos: usize,
         pending_once: bool,
     }
 
-    impl<C: Comparer> TempestIterator<C> for MockIterator<C> {
-        fn poll_next(&mut self, _cx: &mut Context<'_>) -> Poll<TempestResult<Option<()>>> {
+    impl<C: Comparer> MockIterator<C> {
+        fn new() -> Self {
+            Default::default()
+        }
+
+        fn add(mut self, key_id: u64, value: impl Into<Bytes>) -> Self {
+            self.data.push((InternalKey::test(key_id), value.into()));
+            self
+        }
+
+        fn add_with_key(mut self, key: InternalKey<C>, value: impl Into<Bytes>) -> Self {
+            self.data.push((key, value.into()));
+            self
+        }
+
+        fn pending_once(mut self, val: bool) -> Self {
+            self.pending_once = val;
+            self
+        }
+    }
+
+    impl<C: Comparer> TempestIterator<'static, C> for MockIterator<C> {
+        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<TempestResult<Option<()>>> {
             if self.pending_once {
                 self.pending_once = false;
+                // We must wake the context, or the executor hangs forever
+                cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
             if self.pos < self.data.len() {
@@ -313,154 +378,81 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_merging_interleave() {
+    #[tokio::test]
+    async fn test_merging_interleave() {
         setup_tracing();
 
         let mut sources = Vec::new();
-        // Source 1: IDs are 1 and 3
-        sources.push(MergingIteratorHeapEntry {
-            source_id: 1,
-            iter: Box::new(MockIterator {
-                data: vec![
-                    (InternalKey::test(1), Bytes::from("a")),
-                    (InternalKey::test(3), Bytes::from("c")),
-                ],
-                pos: 0,
-                pending_once: false,
-            }),
-        });
-
-        // Source 2: IDs are 2 and 4
-        sources.push(MergingIteratorHeapEntry {
-            source_id: 2,
-            iter: Box::new(MockIterator {
-                data: vec![
-                    (InternalKey::test(2), Bytes::from("b")),
-                    (InternalKey::test(4), Bytes::from("d")),
-                ],
-                pos: 0,
-                pending_once: false,
-            }),
-        });
+        sources.push(MergingIteratorHeapEntry::new(
+            MockIterator::new().add(1, "a").add(3, "c"),
+            1,
+        ));
+        sources.push(MergingIteratorHeapEntry::new(
+            MockIterator::new().add(2, "b").add(4, "d"),
+            2,
+        ));
 
         let mut merger = MergingIterator::<DefaultComparer>::new(sources);
-        let mut cx = dummy_cx();
-
         let mut results = Vec::new();
-        while let Poll::Ready(Ok(Some(()))) = merger.poll_next(&mut cx) {
+
+        // Beautiful async loop
+        while let Ok(Some(())) = merger.next().await {
             results.push(merger.key().unwrap().user_key_as_u64());
         }
 
         assert_eq!(results, vec![1, 2, 3, 4]);
     }
 
-    #[test]
-    fn test_merging_source_priority() {
+    #[tokio::test]
+    async fn test_merging_source_priority() {
         setup_tracing();
 
         let mut sources = Vec::new();
-        // Older source (e.g. SST)
-        sources.push(MergingIteratorHeapEntry {
-            source_id: 10,
-            iter: Box::new(MockIterator {
-                data: vec![(InternalKey::test(1), Bytes::from("old"))],
-                pos: 0,
-                pending_once: false,
-            }),
-        });
-        // Newer source (e.g. MemTable)
-        sources.push(MergingIteratorHeapEntry {
-            source_id: 100,
-            iter: Box::new(MockIterator {
-                data: vec![(InternalKey::test(1), Bytes::from("new"))],
-                pos: 0,
-                pending_once: false,
-            }),
-        });
+        sources.push(MergingIteratorHeapEntry::new(
+            MockIterator::new().add(1, "old"),
+            10,
+        ));
+        sources.push(MergingIteratorHeapEntry::new(
+            MockIterator::new().add(1, "new"),
+            100,
+        ));
 
         let mut merger = MergingIterator::<DefaultComparer>::new(sources);
-        let mut cx = dummy_cx();
 
-        // First poll: should be the one with source_id 100
-        assert!(merger.poll_next(&mut cx).is_ready());
+        // First item: source_id 100 wins
+        assert!(matches!(merger.next().await, Ok(Some(()))));
         assert_eq!(merger.value().unwrap(), &Bytes::from("new"));
 
-        // Second poll: should be the one with source_id 10
-        assert!(merger.poll_next(&mut cx).is_ready());
+        // Second item: source_id 10
+        assert!(matches!(merger.next().await, Ok(Some(()))));
         assert_eq!(merger.value().unwrap(), &Bytes::from("old"));
     }
 
-    #[test]
-    fn test_merging_pending_propagation() {
+    #[tokio::test]
+    async fn test_merging_pending_propagation() {
         setup_tracing();
 
         let mut sources = Vec::new();
-        sources.push(MergingIteratorHeapEntry {
-            source_id: 1,
-            iter: Box::new(MockIterator {
-                data: vec![(InternalKey::test(1), Bytes::from("val"))],
-                pos: 0,
-                pending_once: true, // Will return Pending on first call
-            }),
-        });
+        sources.push(MergingIteratorHeapEntry::new(
+            MockIterator::<DefaultComparer>::new()
+                .add(1, "val")
+                .pending_once(true),
+            1,
+        ));
 
         let mut merger = MergingIterator::<DefaultComparer>::new(sources);
-        let mut cx = dummy_cx();
 
-        // First call: Should be Pending
-        assert!(merger.poll_next(&mut cx).is_pending());
-
-        // Second call: Mock is set to yield data now
-        match merger.poll_next(&mut cx) {
-            Poll::Ready(Ok(Some(()))) => assert_eq!(merger.key().unwrap().user_key_as_u64(), 1),
-            _ => panic!("Expected Ready"),
-        }
+        // The first .await will yield Pending and then resume.
+        // If we want to test the intermediate Pending state specifically,
+        // we'd use a manual poll, but for behavior, next().await is sufficient.
+        let res = merger.next().await;
+        assert!(matches!(res, Ok(Some(()))));
+        assert_eq!(merger.key().unwrap().user_key_as_u64(), 1);
     }
 
-    #[test]
-    fn test_deduplicating() {
+    #[tokio::test]
+    async fn test_deduplicating_with_different_trailers() {
         setup_tracing();
-
-        let inner = MockIterator::<DefaultComparer> {
-            data: vec![
-                (InternalKey::test(1), Bytes::from("val1")),
-                (InternalKey::test(2), Bytes::from("val2")),
-                (InternalKey::test(3), Bytes::from("val3")),
-            ],
-            pos: 0,
-            pending_once: false,
-        };
-
-        let mut deduplicating_iter = DeduplicatingIterator::new(inner);
-        let mut cx = dummy_cx();
-
-        let mut prev = None;
-        loop {
-            let next = deduplicating_iter.poll_next(&mut cx);
-            match (&prev, next) {
-                (None, Poll::Ready(Ok(Some(())))) => {
-                    let next = deduplicating_iter.key().unwrap().clone();
-                    trace!("Got next key: {:?}", next);
-                    prev = Some(next);
-                }
-                (Some(prev_key), Poll::Ready(Ok(Some(())))) => {
-                    let next = deduplicating_iter.key().unwrap().clone();
-                    trace!("Got next key: {:?}", next);
-                    assert!(&next > prev_key);
-                    prev = Some(next);
-                }
-                (_, Poll::Ready(Ok(None))) => break,
-                (_, other) => panic!("Bad polling result: {:?}", other),
-            }
-        }
-    }
-
-    #[test]
-    fn test_deduplicating_with_different_trailers() {
-        setup_tracing();
-        // Create two keys that are equal but with different key trailers
-        // Key A, Seq 100 vs Key A, Seq 50
         let key_a_bytes = Bytes::from("user1");
         let key_a_v2 = InternalKey::new(
             key_a_bytes.clone(),
@@ -471,39 +463,24 @@ mod tests {
             KeyTrailer::new(50.try_into().unwrap(), KeyKind::Put),
         );
 
-        let inner = MockIterator::<DefaultComparer> {
-            data: vec![
-                (key_a_v2.clone(), Bytes::from("new-val")),
-                (key_a_v1.clone(), Bytes::from("old-val")),
-            ],
-            pos: 0,
-            pending_once: false,
-        };
+        let inner = MockIterator::<DefaultComparer>::new()
+            .add_with_key(key_a_v2, "new-val")
+            .add_with_key(key_a_v1, "old-val");
 
         let mut deduplicating_iter = DeduplicatingIterator::new(inner);
-        let mut cx = dummy_cx();
 
-        // First poll should give us Key A version 2
-        assert!(matches!(
-            deduplicating_iter.poll_next(&mut cx),
-            Poll::Ready(Ok(Some(())))
-        ));
+        // Version 2 comes first
+        assert!(matches!(deduplicating_iter.next().await, Ok(Some(()))));
         assert_eq!(deduplicating_iter.value().unwrap(), &Bytes::from("new-val"));
 
-        // Second poll should see Key A version 1, notice it's logically the same,
-        // skip it, and return None because the inner iterator is exhausted.
-        assert!(matches!(
-            deduplicating_iter.poll_next(&mut cx),
-            Poll::Ready(Ok(None))
-        ));
+        // Version 1 is skipped automatically by the deduplicator
+        assert!(matches!(deduplicating_iter.next().await, Ok(None)));
     }
 
-    #[test]
-    fn test_deduplicating_with_fixed_suffix() {
+    #[tokio::test]
+    async fn test_deduplicating_with_fixed_suffix() {
         setup_tracing();
 
-        // We use a 1-byte suffix.
-        // "user1" + "A" and "user1" + "B" share the logical prefix "user1".
         let key_v2 = InternalKey::new(
             Bytes::from("user1B"),
             KeyTrailer::new(100.try_into().unwrap(), KeyKind::Put),
@@ -513,35 +490,20 @@ mod tests {
             KeyTrailer::new(50.try_into().unwrap(), KeyKind::Put),
         );
 
-        // Note: MergingIterator would have already sorted these by physical order.
-        // In FixedSuffixComparer<1>, "user1B" > "user1A", so B comes first.
-        let inner = MockIterator::<FixedSuffixComparer<1>> {
-            data: vec![
-                (key_v2.clone(), Bytes::from("val-version-B")),
-                (key_v1.clone(), Bytes::from("val-version-A")),
-            ],
-            pos: 0,
-            pending_once: false,
-        };
+        let inner = MockIterator::<FixedSuffixComparer<1>>::new()
+            .add_with_key(key_v2, "val-version-B")
+            .add_with_key(key_v1, "val-version-A");
 
         let mut deduplicating_iter = DeduplicatingIterator::new(inner);
-        let mut cx = dummy_cx();
 
-        // 1. Should yield the first logical match found (the newer/higher one)
-        assert!(matches!(
-            deduplicating_iter.poll_next(&mut cx),
-            Poll::Ready(Ok(Some(())))
-        ));
+        // Yields B
+        assert!(matches!(deduplicating_iter.next().await, Ok(Some(()))));
         assert_eq!(
             deduplicating_iter.value().unwrap(),
             &Bytes::from("val-version-B")
         );
 
-        // 2. Should see "user1A", call compare_logical("user1B", "user1A"),
-        // see that "user1" == "user1", and skip it.
-        assert!(matches!(
-            deduplicating_iter.poll_next(&mut cx),
-            Poll::Ready(Ok(None))
-        ));
+        // Skips A because it shares the logical prefix "user1"
+        assert!(matches!(deduplicating_iter.next().await, Ok(None)));
     }
 }

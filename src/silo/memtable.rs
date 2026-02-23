@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
-use crate::base::{Comparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
+use crate::{
+    base::{Comparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
+    silo::iterator::MemTableIterator,
+};
 
 #[derive(Debug, Default)]
 pub(super) struct MemTable<C: Comparer> {
@@ -24,12 +27,12 @@ impl<C: Comparer> MemTable<C> {
         self.map.insert(key, value);
     }
 
-    pub(super) fn get(&self, key: Bytes, snapshot: SeqNum) -> Option<Bytes> {
+    pub(super) fn get(&self, key: &Bytes, snapshot: SeqNum) -> Option<Bytes> {
         let search_trailer = KeyTrailer::new(snapshot, KeyKind::MAX);
         let search_key = InternalKey::new(key.clone(), search_trailer);
 
         for (found_key, found_value) in self.map.range(search_key..) {
-            if found_key.key() != &key {
+            if found_key.key() != key {
                 // Key not found, we skipped past it
                 break;
             }
@@ -42,5 +45,9 @@ impl<C: Comparer> MemTable<C> {
 
         // no value was found
         None
+    }
+
+    pub(super) fn iter(&self) -> MemTableIterator<'_, C> {
+        MemTableIterator::new(self.map.iter().peekable())
     }
 }

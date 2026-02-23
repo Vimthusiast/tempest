@@ -49,6 +49,17 @@ pub struct WriteBatch {
 }
 
 impl WriteBatch {
+    /// Create a new write batch.
+    pub fn new() -> Self {
+        let mut buf = BytesMut::with_capacity(4096);
+        buf.put_bytes(0, 12);
+        Self {
+            buf,
+            count: 0,
+            committed: false,
+        }
+    }
+
     /// Create a new write batch, that stores its encoded data in the buffer.
     pub fn new_in(mut buf: BytesMut) -> Self {
         buf.clear();

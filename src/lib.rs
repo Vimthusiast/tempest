@@ -1,3 +1,5 @@
+#![deny(unused_imports)]
+
 #[macro_use]
 extern crate derive_more;
 

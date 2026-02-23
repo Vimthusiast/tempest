@@ -1,4 +1,4 @@
-//! # Module Silo
+//! # Silo Module
 //!
 //! This module contains the code for our **storage silos**.
 //!
@@ -17,7 +17,12 @@ use crate::{
         TempestResult,
     },
     fio::FioFS,
-    silo::{batch::WriteBatch, manifest::SiloManifest, memtable::MemTable},
+    silo::{
+        batch::WriteBatch,
+        iterator::{DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry},
+        manifest::SiloManifest,
+        memtable::MemTable,
+    },
 };
 
 use bytes::{Buf, Bytes};
@@ -149,11 +154,32 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
     #[instrument(skip_all, level = "debug")]
     pub(crate) async fn get(&self, key: Bytes, snapshot: SeqNum) -> TempestResult<Option<Bytes>> {
-        if let Some(active_result) = self.active.get(key, snapshot) {
+        if let Some(active_result) = self.active.get(&key, snapshot) {
             return Ok(Some(active_result));
         }
 
+        for imm in &self.immutables {
+            if let Some(imm_result) = imm.get(&key, snapshot) {
+                return Ok(Some(imm_result));
+            }
+        }
+
         Ok(None)
+    }
+
+    #[instrument(skip_all, level = "debug")]
+    pub(crate) fn scan(&self) -> DeduplicatingIterator<'_, MergingIterator<'_, C>, C> {
+        let mut sources = Vec::new();
+        sources.push(MergingIteratorHeapEntry::new(self.active.iter(), u64::MAX));
+
+        for (idx, imm) in self.immutables.iter().enumerate() {
+            sources.push(MergingIteratorHeapEntry::new(
+                imm.iter(),
+                u64::MAX - (idx as u64 + 1),
+            ));
+        }
+
+        DeduplicatingIterator::new(MergingIterator::new(sources))
     }
 
     pub(crate) const fn highest_seqnum(&self) -> SeqNum {
@@ -188,7 +214,7 @@ mod tests {
     use bytes::BytesMut;
     use tracing::{Instrument, Level};
 
-    use crate::{fio::VirtualFileSystem, tests::setup_tracing};
+    use crate::{fio::VirtualFileSystem, silo::iterator::TempestIterator, tests::setup_tracing};
 
     use super::*;
 
@@ -273,5 +299,71 @@ mod tests {
             error!("Silo test failed: {}", err);
             panic!("{}", err);
         }
+    }
+
+    #[test]
+    fn test_silo_scan_interleaving_and_deduplication() {
+        setup_tracing();
+
+        let id = 1;
+        let silo_dir = "silo-scan-test";
+        let fs = VirtualFileSystem::new();
+
+        tokio_uring::start(async {
+            let mut silo: Silo<_, DefaultComparer> =
+                Silo::init(id, fs.clone(), silo_dir).await.unwrap();
+
+            // 1. Write initial data and move to immutables
+            let mut batch1 = WriteBatch::new();
+            batch1.put(b"key_a", b"value_old");
+            silo.write(batch1).await.unwrap();
+
+            // Simulate flush freeze
+            let old_mem = std::mem::replace(&mut silo.active, MemTable::new());
+            silo.immutables.push(Arc::new(old_mem));
+
+            // 2. Write an update to "key_a" and a new "key_b"
+            let mut batch2 = WriteBatch::new();
+            batch2.put(b"key_a", b"value_new");
+            batch2.put(b"key_b", b"value_b");
+            silo.write(batch2).await.unwrap();
+
+            let mid_mem = std::mem::replace(&mut silo.active, MemTable::new());
+            silo.immutables.push(Arc::new(mid_mem));
+
+            // 3. Delete "key_b" in the currently active memtable
+            let mut batch3 = WriteBatch::new();
+            batch3.delete(b"key_b");
+            silo.write(batch3).await.unwrap();
+
+            // --- Perform the Scan using the Beautiful Interface ---
+            let mut scanner = silo.scan();
+            let mut results = Vec::new();
+
+            // Clean async loop - no more manual Context or Poll matching!
+            while let Ok(Some(())) = scanner.next().await {
+                let internal_key = scanner.key().unwrap();
+                results.push((
+                    internal_key.key().clone(),
+                    scanner.value().unwrap().clone(),
+                    internal_key.trailer().kind(),
+                ));
+            }
+            drop(scanner);
+
+            // --- Assertions ---
+            assert_eq!(results.len(), 2, "Should have 2 unique logical keys");
+
+            // key_a: versioned by seqnum, highest (newest) should win
+            assert_eq!(results[0].0, "key_a");
+            assert_eq!(results[0].1, "value_new");
+            assert_eq!(results[0].2, KeyKind::Put);
+
+            // key_b: delete marker should shadow the put
+            assert_eq!(results[1].0, "key_b");
+            assert_eq!(results[1].2, KeyKind::Delete);
+
+            silo.shutdown().await.unwrap();
+        });
     }
 }
