@@ -120,19 +120,26 @@ impl KeyKind {
 pub struct KeyTrailer(u64);
 
 impl KeyTrailer {
-    pub fn new(seqnum: SeqNum, kind: KeyKind) -> Self {
+    pub const fn new(seqnum: SeqNum, kind: KeyKind) -> Self {
         Self((seqnum.get() << 8) | (kind as u64))
     }
 
-    pub fn seqnum(&self) -> SeqNum {
+    pub const fn seqnum(&self) -> SeqNum {
         // SAFETY: we right shift by 8, so it's less than or equal to SeqNum::MAX
         unsafe { SeqNum::new_unchecked(self.0 >> 8) }
     }
 
-    pub fn kind(&self) -> KeyKind {
+    pub const fn kind(&self) -> KeyKind {
         // SAFETY: we mask by 0xFF to get the key kind bits,
         // which are always inserted by us and must thus be correct
         unsafe { std::mem::transmute((self.0 & 0xFF) as u8) }
+    }
+
+    /// Creates a key trailer for testing other parts of Tempest.
+    /// This function will always return the exact same zeroed key trailer.
+    #[cfg(test)]
+    pub(crate) const fn test() -> Self {
+        Self::new(SeqNum::ZERO, KeyKind::MIN)
     }
 }
 
@@ -161,10 +168,12 @@ impl<C: Comparer> InternalKey<C> {
     }
 
     /// Generate an internal key for testing other parts of Tempest.
+    /// Test keys with a higher ID will be greater than ones with a lower ID.
+    /// This is useful to test correctness of internal ordering.
     #[cfg(test)]
     pub(crate) fn test(id: u64) -> Self {
         let user_key = Bytes::from(id.to_be_bytes().to_vec());
-        Self::new(user_key, KeyTrailer(0))
+        Self::new(user_key, KeyTrailer::test())
     }
 
     // Test helper that gets the key as an easily comparable `u64` value.
@@ -194,7 +203,7 @@ impl<C: Comparer> cmp::Ord for InternalKey<C> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         let c = C::default();
 
-        match c.compare(self.key.as_ref(), other.key.as_ref()) {
+        match c.compare_physical(self.key.as_ref(), other.key.as_ref()) {
             cmp::Ordering::Equal => other.trailer.cmp(&self.trailer),
             ord => ord,
         }

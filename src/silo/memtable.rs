@@ -6,12 +6,9 @@ use crate::base::{Comparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
 
 #[derive(Debug, Default)]
 pub(super) struct MemTable<C: Comparer> {
+    // TODO: Replace BTreeMap with a Skiplist
     map: BTreeMap<InternalKey<C>, Bytes>,
 }
-
-// [main key (prefix)][8 bytes timestamp]:
-// split(len-8);
-// assert(len>=8);
 
 impl<C: Comparer> MemTable<C> {
     pub(super) fn new() -> Self {

@@ -13,9 +13,17 @@ pub trait Comparer: Default + Clone + 'static {
     /// Compares the suffix part of two keys.
     fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
 
-    /// This function is used to compare two different keys.
+    /// Compares the logical part (user facing) of a key.
+    /// Usually, this just compares the key prefix, but you may choose yourself.
+    fn compare_logical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+        let anon = self.split(a);
+        let bnon = self.split(b);
+        self.compare_prefix(&a[..anon], &b[..bnon])
+    }
+
+    /// Full comparison of two different keys, for physically ordering them in SSTs/MemTables.
     /// It first compares them ascending by the prefix, and then ascending by the suffix.
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+    fn compare_physical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
         let anon = self.split(a);
         let bnon = self.split(b);
 
@@ -59,9 +67,9 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
         self.0.compare_suffix(a, b)
     }
 
-    fn compare(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+    fn compare_physical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
         // compare the two keys completely (prefix and suffix)
-        let res = self.0.compare(a, b);
+        let res = self.0.compare_physical(a, b);
 
         // check for anti-symmetry:
         // `a == b` implies `b == a`
@@ -69,7 +77,7 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
         // `a < b` implies `b > a`
         debug_assert_eq!(
             res,
-            self.0.compare(b, a).reverse(),
+            self.0.compare_physical(b, a).reverse(),
             "Anti-symmetry violation: compare(a,b) != reverse(compare(b,a))"
         );
 
@@ -100,5 +108,46 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
         }
 
         res
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct FixedSuffixComparer<const N: usize>;
+
+impl<const N: usize> Comparer for FixedSuffixComparer<N> {
+    fn split(&self, key: &[u8]) -> usize {
+        key.len().saturating_sub(N)
+    }
+
+    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+        a.cmp(b)
+    }
+
+    fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+        a.cmp(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use itertools::Itertools;
+
+    use super::*;
+    use crate::base::InternalKey;
+
+    #[test]
+    fn test_assert_comparer() {
+        type C = AssertComparer<DefaultComparer>;
+        let keys: &[InternalKey<C>] = &[
+            InternalKey::test(1),
+            InternalKey::test(2),
+            InternalKey::test(3),
+            InternalKey::test(4),
+            InternalKey::test(5),
+        ];
+
+        for (a, b) in keys.iter().tuple_windows() {
+            assert!(b > a);
+        }
     }
 }

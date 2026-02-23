@@ -1,6 +1,8 @@
 use std::{
+    any::type_name,
     cmp::Ordering,
     collections::BinaryHeap,
+    marker::PhantomData,
     task::{self, Poll},
 };
 
@@ -199,9 +201,71 @@ impl<C: Comparer> TempestIterator<C> for MergingIterator<C> {
     }
 }
 
+pub struct DeduplicatingIterator<I, C>
+where
+    I: TempestIterator<C>,
+    C: Comparer,
+{
+    inner: I,
+    last_key: Option<Bytes>,
+    _marker: PhantomData<C>,
+}
+
+impl<I, C> DeduplicatingIterator<I, C>
+where
+    I: TempestIterator<C>,
+    C: Comparer,
+{
+    pub fn new(inner: I) -> Self {
+        Self {
+            inner,
+            last_key: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<I, C> TempestIterator<C> for DeduplicatingIterator<I, C>
+where
+    I: TempestIterator<C>,
+    C: Comparer,
+{
+    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
+        trace!(inner = type_name::<I>(), "Polling deduplicating iterator");
+        let c = C::default();
+        loop {
+            match self.inner.poll_next(cx) {
+                Poll::Ready(Ok(Some(()))) => {
+                    let new_key = self.inner.key().expect("Just polled the iterator");
+                    let last_key = self.last_key.as_ref();
+
+                    // if we have had a key already and the new one is logically equal
+                    if let Some(last_key) = last_key
+                        && c.compare_logical(new_key.key(), last_key).is_eq()
+                    {
+                        // skip this key
+                        continue;
+                    }
+                    self.last_key = Some(new_key.key().clone());
+                    return Poll::Ready(Ok(Some(())));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn key(&self) -> Option<&InternalKey<C>> {
+        self.inner.key()
+    }
+
+    fn value(&self) -> Option<&Bytes> {
+        self.inner.value()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::base::DefaultComparer;
+    use crate::base::{DefaultComparer, FixedSuffixComparer, KeyKind, KeyTrailer, SeqNum};
     use crate::tests::setup_tracing;
 
     use super::*;
@@ -331,8 +395,8 @@ mod tests {
     fn test_merging_pending_propagation() {
         setup_tracing();
 
-        let mut heap = Vec::new();
-        heap.push(MergingIteratorHeapEntry {
+        let mut sources = Vec::new();
+        sources.push(MergingIteratorHeapEntry {
             source_id: 1,
             iter: Box::new(MockIterator {
                 data: vec![(InternalKey::test(1), Bytes::from("val"))],
@@ -341,7 +405,7 @@ mod tests {
             }),
         });
 
-        let mut merger = MergingIterator::<DefaultComparer>::new(heap);
+        let mut merger = MergingIterator::<DefaultComparer>::new(sources);
         let mut cx = dummy_cx();
 
         // First call: Should be Pending
@@ -352,5 +416,132 @@ mod tests {
             Poll::Ready(Ok(Some(()))) => assert_eq!(merger.key().unwrap().user_key_as_u64(), 1),
             _ => panic!("Expected Ready"),
         }
+    }
+
+    #[test]
+    fn test_deduplicating() {
+        setup_tracing();
+
+        let inner = MockIterator::<DefaultComparer> {
+            data: vec![
+                (InternalKey::test(1), Bytes::from("val1")),
+                (InternalKey::test(2), Bytes::from("val2")),
+                (InternalKey::test(3), Bytes::from("val3")),
+            ],
+            pos: 0,
+            pending_once: false,
+        };
+
+        let mut deduplicating_iter = DeduplicatingIterator::new(inner);
+        let mut cx = dummy_cx();
+
+        let mut prev = None;
+        loop {
+            let next = deduplicating_iter.poll_next(&mut cx);
+            match (&prev, next) {
+                (None, Poll::Ready(Ok(Some(())))) => {
+                    let next = deduplicating_iter.key().unwrap().clone();
+                    trace!("Got next key: {:?}", next);
+                    prev = Some(next);
+                }
+                (Some(prev_key), Poll::Ready(Ok(Some(())))) => {
+                    let next = deduplicating_iter.key().unwrap().clone();
+                    trace!("Got next key: {:?}", next);
+                    assert!(&next > prev_key);
+                    prev = Some(next);
+                }
+                (_, Poll::Ready(Ok(None))) => break,
+                (_, other) => panic!("Bad polling result: {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_deduplicating_with_different_trailers() {
+        setup_tracing();
+        // Create two keys that are equal but with different key trailers
+        // Key A, Seq 100 vs Key A, Seq 50
+        let key_a_bytes = Bytes::from("user1");
+        let key_a_v2 = InternalKey::new(
+            key_a_bytes.clone(),
+            KeyTrailer::new(100.try_into().unwrap(), KeyKind::Put),
+        );
+        let key_a_v1 = InternalKey::new(
+            key_a_bytes,
+            KeyTrailer::new(50.try_into().unwrap(), KeyKind::Put),
+        );
+
+        let inner = MockIterator::<DefaultComparer> {
+            data: vec![
+                (key_a_v2.clone(), Bytes::from("new-val")),
+                (key_a_v1.clone(), Bytes::from("old-val")),
+            ],
+            pos: 0,
+            pending_once: false,
+        };
+
+        let mut deduplicating_iter = DeduplicatingIterator::new(inner);
+        let mut cx = dummy_cx();
+
+        // First poll should give us Key A version 2
+        assert!(matches!(
+            deduplicating_iter.poll_next(&mut cx),
+            Poll::Ready(Ok(Some(())))
+        ));
+        assert_eq!(deduplicating_iter.value().unwrap(), &Bytes::from("new-val"));
+
+        // Second poll should see Key A version 1, notice it's logically the same,
+        // skip it, and return None because the inner iterator is exhausted.
+        assert!(matches!(
+            deduplicating_iter.poll_next(&mut cx),
+            Poll::Ready(Ok(None))
+        ));
+    }
+
+    #[test]
+    fn test_deduplicating_with_fixed_suffix() {
+        setup_tracing();
+
+        // We use a 1-byte suffix.
+        // "user1" + "A" and "user1" + "B" share the logical prefix "user1".
+        let key_v2 = InternalKey::new(
+            Bytes::from("user1B"),
+            KeyTrailer::new(100.try_into().unwrap(), KeyKind::Put),
+        );
+        let key_v1 = InternalKey::new(
+            Bytes::from("user1A"),
+            KeyTrailer::new(50.try_into().unwrap(), KeyKind::Put),
+        );
+
+        // Note: MergingIterator would have already sorted these by physical order.
+        // In FixedSuffixComparer<1>, "user1B" > "user1A", so B comes first.
+        let inner = MockIterator::<FixedSuffixComparer<1>> {
+            data: vec![
+                (key_v2.clone(), Bytes::from("val-version-B")),
+                (key_v1.clone(), Bytes::from("val-version-A")),
+            ],
+            pos: 0,
+            pending_once: false,
+        };
+
+        let mut deduplicating_iter = DeduplicatingIterator::new(inner);
+        let mut cx = dummy_cx();
+
+        // 1. Should yield the first logical match found (the newer/higher one)
+        assert!(matches!(
+            deduplicating_iter.poll_next(&mut cx),
+            Poll::Ready(Ok(Some(())))
+        ));
+        assert_eq!(
+            deduplicating_iter.value().unwrap(),
+            &Bytes::from("val-version-B")
+        );
+
+        // 2. Should see "user1A", call compare_logical("user1B", "user1A"),
+        // see that "user1" == "user1", and skip it.
+        assert!(matches!(
+            deduplicating_iter.poll_next(&mut cx),
+            Poll::Ready(Ok(None))
+        ));
     }
 }
