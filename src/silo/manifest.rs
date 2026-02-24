@@ -4,10 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use bincode::Options as BincodeOptions;
 use bytes::{BufMut, BytesMut};
 use crc64::crc64;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use tokio_uring::buf::BoundedBuf;
 
 use crate::{
     base::{SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult},
@@ -22,6 +24,13 @@ fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, file_number: u64) -> Pat
         .as_ref()
         .join(format!("l-{}", level))
         .join(format!("{}.sst", file_number))
+}
+
+fn bincode_options() -> impl BincodeOptions {
+    bincode::options()
+        .with_fixint_encoding() // Important: no variable length ints
+        .with_little_endian() // Ensure consistency across platforms
+        .allow_trailing_bytes()
 }
 
 /// # SST Metadata
@@ -376,6 +385,7 @@ impl<F: FioFS> SiloManifest<F> {
                             break;
                         }
                     };
+                    trace!("Got edit from manifest: {:?}", edit);
                     current_filepos += bytes_read;
                     let edit = edit.into_latest();
 
@@ -596,7 +606,7 @@ impl<F: FioFS> SiloManifest<F> {
         scratch.put_bytes(0, SILO_MANIFEST_RECORD_PREFIX_SIZE);
 
         // write the edit into the buffer
-        if let Err(e) = bincode::serialize_into((&mut scratch).writer(), edit) {
+        if let Err(e) = bincode_options().serialize_into((&mut scratch).writer(), edit) {
             return (Err(e.into()), scratch);
         }
 
@@ -643,27 +653,45 @@ impl<F: FioFS> SiloManifest<F> {
         scratch.clear();
 
         // make space for the manifest record to read
-        scratch.put_bytes(0, SILO_MANIFEST_RECORD_PREFIX_SIZE);
-        let (res, mut scratch) = file.read_exact_at(scratch, current_filepos).await;
+        scratch.resize(SILO_MANIFEST_RECORD_PREFIX_SIZE, 0);
+        trace!(
+            buf_len = scratch.len(),
+            buf_cap = scratch.capacity(),
+            "Trying to read manifest record prefix into scratch buffer"
+        );
+        let (res, slice) = file
+            .read_exact_at(scratch.slice(0..12), current_filepos)
+            .await;
         if let Err(e) = res {
-            return (Err(e.into()), scratch);
+            return (Err(e.into()), slice.into_inner());
         }
+        assert_eq!(slice.len(), SILO_MANIFEST_RECORD_PREFIX_SIZE);
         current_filepos += SILO_MANIFEST_RECORD_PREFIX_SIZE as u64;
 
         // decode the record prefix
-        let prefix = SiloManifestRecordPrefix::decode(scratch.as_ref().try_into().unwrap());
+        let prefix = SiloManifestRecordPrefix::decode(slice.as_ref().try_into().unwrap());
+        trace!(
+            data_len = prefix.data_len,
+            checksum = prefix.checksum,
+            "Read and decoded manifest record prefix"
+        );
+
+        // reconstruct the inner buffer from the sliced view
+        let mut scratch = slice.into_inner();
 
         // read the record body
         scratch.clear();
         scratch.put_bytes(0, prefix.data_len as usize);
-        let (res, scratch) = file.read_exact_at(scratch, current_filepos).await;
+        let (res, slice) = file
+            .read_exact_at(scratch.slice(0..prefix.data_len as usize), current_filepos)
+            .await;
         if let Err(e) = res {
-            return (Err(e.into()), scratch);
+            return (Err(e.into()), slice.into_inner());
         }
         current_filepos += prefix.data_len as u64;
 
         // validate with checksum
-        let is_valid = prefix.is_valid_data(scratch.as_ref());
+        let is_valid = prefix.is_valid_data(slice.as_ref());
         if !is_valid {
             return (
                 Err(io::Error::new(
@@ -671,19 +699,19 @@ impl<F: FioFS> SiloManifest<F> {
                     "Manifest record prefix body was corrupted.",
                 )
                 .into()),
-                scratch,
+                slice.into_inner(),
             );
         }
 
         // parse manifest edit from the body
-        let edit: ManifestEdit = match bincode::deserialize(&scratch) {
+        let edit: ManifestEdit = match bincode_options().deserialize(&slice) {
             Ok(e) => e,
-            Err(e) => return (Err(e.into()), scratch),
+            Err(e) => return (Err(e.into()), slice.into_inner()),
         };
 
         let bytes_read = current_filepos - filepos;
 
-        (Ok((edit, bytes_read)), scratch)
+        (Ok((edit, bytes_read)), slice.into_inner())
     }
 
     fn calculate_filenum_range(

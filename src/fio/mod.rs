@@ -52,7 +52,7 @@ pub trait FioFile: Unpin {
 }
 
 #[async_trait(?Send)]
-pub trait FioFS: Clone {
+pub trait FioFS: Send + Sync + 'static + Clone {
     /// The representation of a single file in this file system.
     type File: FioFile;
 

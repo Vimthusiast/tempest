@@ -1,4 +1,12 @@
-#![deny(unused_imports)]
+use std::path::PathBuf;
+
+use bytes::Bytes;
+
+use crate::{
+    base::{DefaultComparer, InternalKey, TempestResult},
+    fio::FioFS,
+    silo::{SiloHandle, SiloWorker, batch::WriteBatch},
+};
 
 #[macro_use]
 extern crate derive_more;
@@ -10,7 +18,55 @@ pub mod base;
 pub mod fio;
 pub mod silo;
 
-pub struct Tempest;
+pub struct Tempest<F: FioFS> {
+    silo_handles: Vec<(u64, SiloHandle)>,
+
+    root_dir: PathBuf,
+    fs: F,
+}
+
+impl<F: FioFS> Tempest<F> {
+    pub fn new(fs: F, root_dir: impl Into<PathBuf>) -> Self {
+        let root_dir = root_dir.into();
+
+        info!("Creating tempest new instance");
+        Self {
+            silo_handles: Vec::new(),
+
+            root_dir: root_dir.into(),
+            fs,
+        }
+    }
+
+    pub async fn start(mut self) -> TempestResult<()> {
+        //let num_cpus = num_cpus::get() as u64;
+        let num_cpus = 1;
+        info!(num_cpus, "Starting Tempest");
+
+        for id in 0..num_cpus {
+            let handle =
+                SiloWorker::<F, DefaultComparer>::spawn_worker(id, self.fs.clone(), &self.root_dir);
+            self.silo_handles.push((id, handle));
+        }
+
+
+        let mut write_futures = Vec::new();
+        for (_id, handle) in &self.silo_handles {
+            let mut batch = WriteBatch::new();
+            batch.put(b"key1", b"value1");
+            batch.put(b"key2", b"value2");
+            write_futures.push(handle.write(batch));
+        }
+        let write_results = futures::future::join_all(write_futures).await;
+        for (i, res) in write_results.into_iter().enumerate() {
+            if let Err(err) = res {
+                error!("Could not write to silo {}: {}", i, err)
+            }
+        }
+
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {

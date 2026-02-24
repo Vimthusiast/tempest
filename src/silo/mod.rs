@@ -9,7 +9,11 @@
 //! **performance** and allows us to utilize certain Linux kernel features, such as **io_uring**,
 //! which is bound to be used on one thread by implementation, i.e. most types are !Send.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    thread,
+};
 
 use crate::{
     base::{
@@ -27,7 +31,11 @@ use crate::{
 
 use bytes::{Buf, Bytes};
 use integer_encoding::VarInt;
-use tracing::instrument;
+use tokio::{
+    select,
+    sync::{mpsc, oneshot},
+};
+use tracing::{Instrument, Level, instrument};
 
 pub mod batch;
 pub mod iterator;
@@ -38,7 +46,7 @@ pub mod wal;
 #[derive(Debug)]
 pub(crate) struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
     /// The ID of this silo.
-    id: u16,
+    id: u64,
     /// The root directory for this silo.
     root_dir: PathBuf,
 
@@ -61,7 +69,7 @@ fn read_varint(src: &[u8]) -> Option<(usize, usize)> {
 }
 
 impl<F: FioFS, C: Comparer> Silo<F, C> {
-    pub(crate) async fn init(id: u16, fs: F, root_dir: impl Into<PathBuf>) -> TempestResult<Self> {
+    pub(crate) async fn init(id: u64, fs: F, root_dir: impl Into<PathBuf>) -> TempestResult<Self> {
         info!("Initializing silo");
         let root_dir = root_dir.into();
 
@@ -209,6 +217,103 @@ impl<F: FioFS, C: Comparer> Drop for Silo<F, C> {
     }
 }
 
+pub struct SiloHandle {
+    sender: mpsc::Sender<SiloCommand>,
+}
+
+impl SiloHandle {
+    pub async fn write(&self, batch: WriteBatch) -> TempestResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SiloCommand::Write {
+                batch,
+                respond_to: tx,
+            })
+            .await?;
+        rx.await?
+    }
+}
+
+pub enum SiloCommand {
+    Write {
+        batch: WriteBatch,
+        respond_to: oneshot::Sender<TempestResult<()>>,
+    },
+    Scan {},
+}
+
+/// A background worker that can be controlled through channel commands and manages a [`Silo`].
+pub struct SiloWorker<F: FioFS, C: Comparer> {
+    silo: Silo<F, C>,
+    receiver: mpsc::Receiver<SiloCommand>,
+}
+
+impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
+    /// Creates a silo worker that initializes and manages a [`Silo`] within the `root_dir`.
+    pub fn spawn_worker(id: u64, fs: F, root_dir: impl Into<PathBuf>) -> SiloHandle {
+        let root_dir = root_dir.into();
+        let silo_dir = root_dir.join(format!("silo-{}", id));
+        let (sender, receiver) = mpsc::channel(1024);
+
+        thread::spawn(move || {
+            let _worker_entered = span!(Level::INFO, "silo-worker", id).entered();
+            info!(id, ?root_dir, "Spawning silo worker");
+            // Specify core affinity for this worker
+            core_affinity::set_for_current(core_affinity::CoreId { id: id as usize });
+
+            let result = tokio_uring::start(async move {
+                info!(id, "Initialized tokio-uring runtime");
+                let silo = Silo::<F, C>::init(id, fs, silo_dir).await?;
+                let mut worker = SiloWorker { silo, receiver };
+                worker.start().await?;
+
+                Ok::<_, TempestError>(())
+            });
+            if let Err(err) = result {
+                error!("Silo worker crashed: {}", err);
+            }
+        });
+
+        SiloHandle { sender }
+    }
+
+    async fn start(&mut self) -> TempestResult<()> {
+        info!("Starting silo worker");
+        loop {
+            match self.receiver.recv().await {
+                Some(cmd) => {
+                    if let Err(err) = self.handle_command(cmd).await {
+                        error!("Could not handle command: {}", err);
+                        break;
+                    }
+                }
+                None => {
+                    info!("Silo worker channel closed. Exiting");
+                    break;
+                }
+            }
+        }
+        self.silo.shutdown().await?;
+        Ok(())
+    }
+
+    async fn handle_command(&mut self, cmd: SiloCommand) -> TempestResult<()> {
+        match cmd {
+            SiloCommand::Write { batch, respond_to } => {
+                let result = self.silo.write(batch).await;
+                if let Err(e) = result.as_ref() {
+                    error!("Failed to execute write command: {}", e);
+                }
+                if let Err(_) = respond_to.send(result) {
+                    error!("Could not respond to write command: Channel closed");
+                }
+                Ok(())
+            }
+            SiloCommand::Scan {} => todo!(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::BytesMut;
@@ -309,61 +414,65 @@ mod tests {
         let silo_dir = "silo-scan-test";
         let fs = VirtualFileSystem::new();
 
-        tokio_uring::start(async {
-            let mut silo: Silo<_, DefaultComparer> =
-                Silo::init(id, fs.clone(), silo_dir).await.unwrap();
+        let silo_span = span!(Level::INFO, "silo", id);
+        tokio_uring::start(
+            async {
+                let mut silo: Silo<_, DefaultComparer> =
+                    Silo::init(id, fs.clone(), silo_dir).await.unwrap();
 
-            // 1. Write initial data and move to immutables
-            let mut batch1 = WriteBatch::new();
-            batch1.put(b"key_a", b"value_old");
-            silo.write(batch1).await.unwrap();
+                // 1. Write initial data and move to immutables
+                let mut batch1 = WriteBatch::new();
+                batch1.put(b"key_a", b"value_old");
+                silo.write(batch1).await.unwrap();
 
-            // Simulate flush freeze
-            let old_mem = std::mem::replace(&mut silo.active, MemTable::new());
-            silo.immutables.push(Arc::new(old_mem));
+                // Simulate flush freeze
+                let old_mem = std::mem::replace(&mut silo.active, MemTable::new());
+                silo.immutables.push(Arc::new(old_mem));
 
-            // 2. Write an update to "key_a" and a new "key_b"
-            let mut batch2 = WriteBatch::new();
-            batch2.put(b"key_a", b"value_new");
-            batch2.put(b"key_b", b"value_b");
-            silo.write(batch2).await.unwrap();
+                // 2. Write an update to "key_a" and a new "key_b"
+                let mut batch2 = WriteBatch::new();
+                batch2.put(b"key_a", b"value_new");
+                batch2.put(b"key_b", b"value_b");
+                silo.write(batch2).await.unwrap();
 
-            let mid_mem = std::mem::replace(&mut silo.active, MemTable::new());
-            silo.immutables.push(Arc::new(mid_mem));
+                let mid_mem = std::mem::replace(&mut silo.active, MemTable::new());
+                silo.immutables.push(Arc::new(mid_mem));
 
-            // 3. Delete "key_b" in the currently active memtable
-            let mut batch3 = WriteBatch::new();
-            batch3.delete(b"key_b");
-            silo.write(batch3).await.unwrap();
+                // 3. Delete "key_b" in the currently active memtable
+                let mut batch3 = WriteBatch::new();
+                batch3.delete(b"key_b");
+                silo.write(batch3).await.unwrap();
 
-            // --- Perform the Scan using the Beautiful Interface ---
-            let mut scanner = silo.scan();
-            let mut results = Vec::new();
+                // --- Perform the Scan using the Beautiful Interface ---
+                let mut scanner = silo.scan();
+                let mut results = Vec::new();
 
-            // Clean async loop - no more manual Context or Poll matching!
-            while let Ok(Some(())) = scanner.next().await {
-                let internal_key = scanner.key().unwrap();
-                results.push((
-                    internal_key.key().clone(),
-                    scanner.value().unwrap().clone(),
-                    internal_key.trailer().kind(),
-                ));
+                // Clean async loop - no more manual Context or Poll matching!
+                while let Ok(Some(())) = scanner.next().await {
+                    let internal_key = scanner.key().unwrap();
+                    results.push((
+                        internal_key.key().clone(),
+                        scanner.value().unwrap().clone(),
+                        internal_key.trailer().kind(),
+                    ));
+                }
+                drop(scanner);
+
+                // --- Assertions ---
+                assert_eq!(results.len(), 2, "Should have 2 unique logical keys");
+
+                // key_a: versioned by seqnum, highest (newest) should win
+                assert_eq!(results[0].0, "key_a");
+                assert_eq!(results[0].1, "value_new");
+                assert_eq!(results[0].2, KeyKind::Put);
+
+                // key_b: delete marker should shadow the put
+                assert_eq!(results[1].0, "key_b");
+                assert_eq!(results[1].2, KeyKind::Delete);
+
+                silo.shutdown().await.unwrap();
             }
-            drop(scanner);
-
-            // --- Assertions ---
-            assert_eq!(results.len(), 2, "Should have 2 unique logical keys");
-
-            // key_a: versioned by seqnum, highest (newest) should win
-            assert_eq!(results[0].0, "key_a");
-            assert_eq!(results[0].1, "value_new");
-            assert_eq!(results[0].2, KeyKind::Put);
-
-            // key_b: delete marker should shadow the put
-            assert_eq!(results[1].0, "key_b");
-            assert_eq!(results[1].2, KeyKind::Delete);
-
-            silo.shutdown().await.unwrap();
-        });
+            .instrument(silo_span),
+        );
     }
 }

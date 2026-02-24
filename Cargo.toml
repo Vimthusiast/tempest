@@ -8,6 +8,7 @@ arc-swap = "1.8.2"
 async-trait = "0.1.89"
 bincode = "=1.3.3"
 bytes = "1.11.1"
+core_affinity = "0.8.3"
 crc64 = "2.0.0"
 derive_more = { version = "2.1.1", features = ["full"] }
 futures = "0.3.31"
@@ -17,11 +18,11 @@ logos = "0.16.1"
 nonmax = { version = "0.5.5", features = ["serde"] }
 num_enum = "0.7.5"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
+smallvec = "1.15.1"
 strum = { version = "0.27.2", features = ["derive"] }
-tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time", "fs", "io-util"] }
+tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time", "fs", "io-util", "signal"] }
 tokio-uring = { version = "0.5.0", features = ["bytes"] }
 tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
 zerocopy = { version = "0.8.39", features = ["derive", "std"] }
-
-[dev-dependencies]
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+num_cpus = "1.17.0"

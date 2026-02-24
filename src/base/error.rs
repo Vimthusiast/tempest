@@ -1,6 +1,10 @@
 use num_enum::TryFromPrimitiveError;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::base::{KeyKind, SeqNum};
+use crate::{
+    base::{KeyKind, SeqNum},
+    silo::SiloCommand,
+};
 
 #[derive(Debug, Display, Error, From)]
 pub enum TempestError {
@@ -25,6 +29,12 @@ pub enum TempestError {
 
     #[display("Invalid Varint: Failed to decode.")]
     InvalidVarint,
+
+    #[display("Could not send silo command: Channel closed")]
+    SiloCommandSendError(mpsc::error::SendError<SiloCommand>),
+
+    #[display("Could not receive from oneshot channel: Channel closed")]
+    OneshotChannelRecvError(oneshot::error::RecvError),
 }
 
 pub type TempestResult<T> = Result<T, TempestError>;
