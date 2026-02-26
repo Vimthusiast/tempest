@@ -16,12 +16,6 @@ use crate::fio::{FioDirEntry, FioFS, FioFile, OpenOptions};
 #[debug("VirtualFile({:p})", Arc::as_ptr(_0))]
 pub struct VirtualFile(Arc<RwLock<Vec<u8>>>);
 
-impl VirtualFile {
-    fn new(data: Arc<RwLock<Vec<u8>>>) -> Self {
-        Self(data)
-    }
-}
-
 #[async_trait(?Send)]
 impl FioFile for VirtualFile {
     async fn sync_all(&self) -> io::Result<()> {
@@ -51,7 +45,7 @@ impl FioFile for VirtualFile {
             return (
                 Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    "Unexpected end of file",
+                    "unexpected end of file",
                 )),
                 buf,
             );
@@ -77,7 +71,7 @@ impl FioFile for VirtualFile {
                 return (
                     Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "Position overflow",
+                        "position overflow",
                     )),
                     buf,
                 );
@@ -114,7 +108,7 @@ impl VirtualFileSystem {
         for comp in path.as_ref().components() {
             match comp {
                 std::path::Component::Prefix(_) => panic!(
-                    "Path prefix in VFS is not supported! Got path {:?}.",
+                    "path prefix in VFS is not supported! Got path {:?}.",
                     path.as_ref()
                 ),
                 std::path::Component::RootDir => {} // Ignore, we add it at the end
@@ -124,7 +118,7 @@ impl VirtualFileSystem {
                     let old = components.pop();
                     debug_assert!(
                         matches!(old, Some(_)),
-                        "Parent directory navigation at root!"
+                        "parent directory navigation at root!"
                     );
                 }
                 std::path::Component::CurDir => {} // Skip "."
@@ -141,12 +135,15 @@ impl VirtualFileSystem {
 impl FioFS for VirtualFileSystem {
     type File = VirtualFile;
 
-    // TODO: Use opts within the file to check if accesses are valid?
-    // TODO: Allow for opening directories as files (like on unix)?
-    // TODO: Allow for retrieving the file path from the file handle?
+    // NB: We could:
+    // - keep opts within the file to check if accesses are valid
+    // - allow for opening directories as files (like on unix)
+    // - allow for retrieving the file path from the file handle?
+    // But this is mainly just a mock for unit testing some components,
+    // so we do not have to go that far, because it wont be useful in prod.
     async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File> {
         let path = Self::normalize(path);
-        trace!("Opening file {:?}", path);
+        trace!("opening file {:?}", path);
         let requires_mutable = opts.create_new || opts.create;
         if requires_mutable {
             let mut files = self.files.write().await;
@@ -154,7 +151,7 @@ impl FioFS for VirtualFileSystem {
                 if opts.create_new {
                     Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        "File already exists",
+                        "file already exists",
                     ))
                 } else {
                     if opts.truncate {
@@ -168,7 +165,7 @@ impl FioFS for VirtualFileSystem {
                     files.insert(path, file.clone());
                     Ok(VirtualFile(file))
                 } else {
-                    Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
+                    Err(io::Error::new(io::ErrorKind::NotFound, "file not found"))
                 }
             }
         } else {
@@ -179,30 +176,30 @@ impl FioFS for VirtualFileSystem {
                 }
                 Ok(VirtualFile(file.clone()))
             } else {
-                Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
+                Err(io::Error::new(io::ErrorKind::NotFound, "file not found"))
             }
         }
     }
 
     async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         // No-op, virtual file-system is has no hierarchy, so we don't manage any directory entries
-        trace!("Creating directory {:?}", path);
+        trace!("creating directory {:?}", path);
         Ok(())
     }
 
     async fn sync_dir(&self, path: &Path) -> io::Result<()> {
-        trace!("Syncing directory {:?}", path);
+        trace!("syncing directory {:?}", path);
         Ok(())
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let from = Self::normalize(from);
         let to = Self::normalize(to);
-        trace!("Renaming file {:?} to {:?}", from, to);
+        trace!("renaming file {:?} to {:?}", from, to);
         let mut files = self.files.write().await;
         let data = files
             .remove(&from)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Source file not found"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "source file not found"))?;
 
         files.insert(to, data);
         Ok(())
@@ -213,7 +210,7 @@ impl FioFS for VirtualFileSystem {
         path: &Path,
     ) -> io::Result<BoxStream<'static, io::Result<FioDirEntry>>> {
         let search_path = Self::normalize(path);
-        trace!("Reading directory {:?}", search_path);
+        trace!("reading directory {:?}", search_path);
         let mut prefix = search_path.to_string_lossy().into_owned();
         if !prefix.ends_with('/') {
             prefix.push('/');

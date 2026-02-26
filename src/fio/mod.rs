@@ -55,32 +55,32 @@ pub struct OpenBuilder<F: FioFS> {
 }
 
 impl<F: FioFS> OpenBuilder<F> {
-    pub fn new(fs: F) -> Self {
+    pub(crate) fn new(fs: F) -> Self {
         let opts = OpenOptions::default();
         Self { fs, opts }
     }
 
-    pub fn read(&mut self, read: bool) -> &mut Self {
+    pub const fn read(mut self, read: bool) -> Self {
         self.opts.read = read;
         self
     }
 
-    pub fn write(&mut self, write: bool) -> &mut Self {
+    pub const fn write(mut self, write: bool) -> Self {
         self.opts.write = write;
         self
     }
 
-    pub fn create(&mut self, create: bool) -> &mut Self {
+    pub const fn create(mut self, create: bool) -> Self {
         self.opts.create = create;
         self
     }
 
-    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+    pub const fn create_new(mut self, create_new: bool) -> Self {
         self.opts.create_new = create_new;
         self
     }
 
-    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+    pub const fn truncate(mut self, truncate: bool) -> Self {
         self.opts.truncate = truncate;
         self
     }

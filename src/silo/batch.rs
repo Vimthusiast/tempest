@@ -93,7 +93,7 @@ impl WriteBatch {
 
     /// Add a `put KEY=VALUE` command to this batch.
     pub fn put(&mut self, key: &[u8], value: &[u8]) {
-        trace!("WriteBatch: put '{:?}'='{:?}'", key, value);
+        trace!("write batch: put '{:?}'='{:?}'", key, value);
         self.count += 1;
         self.buf.put_u8(KeyKind::Put.into());
         self.put_varint(key.len());
@@ -104,7 +104,7 @@ impl WriteBatch {
 
     /// Add a `delete KEY` command to this batch.
     pub fn delete(&mut self, key: &[u8]) {
-        trace!("WriteBatch: delete '{:?}'", key);
+        trace!("write batch: delete '{:?}'", key);
         self.count += 1;
         self.buf.put_u8(KeyKind::Delete.into());
         self.put_varint(key.len());
@@ -131,7 +131,7 @@ impl WriteBatch {
     pub(crate) fn take_buf(self) -> BytesMut {
         assert!(
             self.committed,
-            "Trying to access a write batch, that was not assigned a seqnum."
+            "trying to access a write batch, that was not assigned a seqnum."
         );
         self.buf
     }

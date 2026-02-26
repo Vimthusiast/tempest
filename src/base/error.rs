@@ -9,31 +9,31 @@ use crate::{
 #[derive(Debug, Display, Error, From)]
 pub enum TempestError {
     #[from(skip)]
-    #[display("Sequence number overflow: {_0} exceeds maximum allowed ({}).", SeqNum::MAX.get())]
+    #[display("sequence number overflow: {_0} exceeds maximum allowed ({}).", SeqNum::MAX.get())]
     SeqNumOverflow(#[error(not(source))] u64),
 
-    #[display("File number hard limit of 2^64 reached")]
+    #[display("file number hard limit of 2^64 reached")]
     FileNumOverflow,
 
-    #[display("I/O error: {}", _0)]
+    #[display("i/o error: {}", _0)]
     IoError(std::io::Error),
 
-    #[display("Failed to encode: {}", _0)]
+    #[display("failed to encode: {}", _0)]
     BincodeError(bincode::Error),
 
-    #[display("Tempest error: {}", _0)]
+    #[display("{}", _0)]
     Other(#[error(not(source))] &'static str),
 
-    #[display("Invalid key kind: {}", _0.number)]
+    #[display("invalid key kind: {}", _0.number)]
     InvalidKeyKind(TryFromPrimitiveError<KeyKind>),
 
-    #[display("Invalid Varint: Failed to decode.")]
+    #[display("invalid Varint: failed to decode.")]
     InvalidVarint,
 
-    #[display("Could not send silo command: Channel closed")]
+    #[display("could not send silo command: channel closed")]
     SiloCommandSendError(mpsc::error::SendError<SiloCommand>),
 
-    #[display("Could not receive from oneshot channel: Channel closed")]
+    #[display("could not receive from oneshot channel: channel closed")]
     OneshotChannelRecvError(oneshot::error::RecvError),
 }
 

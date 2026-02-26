@@ -171,23 +171,23 @@ impl<'a, C: Comparer> MergingIterator<'a, C> {
 impl<'a, C: Comparer> TempestIterator<'a, C> for MergingIterator<'a, C> {
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
         if let MergingIteratorState::Initializing { ref mut sources } = self.state {
-            trace!(sources = sources.len(), "Initializing merging iterator");
+            trace!(sources = sources.len(), "initializing merging iterator");
             let mut i = 0;
             while i < sources.len() {
                 match sources[i].iter.poll_next(cx) {
                     Poll::Ready(Ok(Some(()))) => {
-                        trace!("Source ready");
+                        trace!("source ready");
                         // Got more data, move to heap
                         let entry = sources.swap_remove(i);
                         self.heap.push(entry);
                     }
                     Poll::Ready(Ok(None)) => {
-                        trace!("Source empty");
+                        trace!("source empty");
                         // Source is empty, discard it
                         sources.swap_remove(i);
                     }
                     Poll::Pending => {
-                        trace!("Source still pending");
+                        trace!("source still pending");
                         // Source is still pending, skip for now
                         i += 1;
                     }
@@ -196,13 +196,13 @@ impl<'a, C: Comparer> TempestIterator<'a, C> for MergingIterator<'a, C> {
             }
 
             if sources.is_empty() {
-                trace!("Finished initializing merging iterator");
+                trace!("finished initializing merging iterator");
                 self.state = MergingIteratorState::Active;
                 if self.heap.is_empty() {
                     return Poll::Ready(Ok(None));
                 }
             } else {
-                trace!("Initializing finished, but still incomplete");
+                trace!("initializing finished, but still incomplete");
                 return Poll::Pending;
             }
         }
@@ -210,11 +210,11 @@ impl<'a, C: Comparer> TempestIterator<'a, C> for MergingIterator<'a, C> {
         // If we already have a current value, the user is done with it and we must advance
         // our top iterator that provided the current value, before finding the next one.
         if self.current.is_some() {
-            trace!("Polling sources");
+            trace!("polling sources");
             let mut top = self
                 .heap
                 .pop()
-                .expect("Heap cannot be empty if current is not");
+                .expect("heap cannot be empty if current is not");
             match top.iter.poll_next(cx) {
                 Poll::Ready(Ok(Some(()))) => self.heap.push(top),
                 Poll::Ready(Ok(None)) => {} // Iterator empty, do not push back
@@ -230,14 +230,14 @@ impl<'a, C: Comparer> TempestIterator<'a, C> for MergingIterator<'a, C> {
             self.current = Some((
                 top.iter
                     .key()
-                    .expect("Iterators on heap must not be exhausted")
+                    .expect("iterators on heap must not be exhausted")
                     .clone(),
                 top.iter
                     .value()
-                    .expect("Iterators on heap must not be exhausted")
+                    .expect("iterators on heap must not be exhausted")
                     .clone(),
             ));
-            trace!(current = ?self.current, "Got current value");
+            trace!(current = ?self.current, "got current value");
             Poll::Ready(Ok(Some(())))
         } else {
             self.current = None;
@@ -284,12 +284,12 @@ where
     C: Comparer,
 {
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
-        trace!(inner = type_name::<I>(), "Polling deduplicating iterator");
+        trace!(inner = type_name::<I>(), "polling deduplicating iterator");
         let c = C::default();
         loop {
             match self.inner.poll_next(cx) {
                 Poll::Ready(Ok(Some(()))) => {
-                    let new_key = self.inner.key().expect("Just polled the iterator");
+                    let new_key = self.inner.key().expect("just polled the iterator");
                     let last_key = self.last_key.as_ref();
 
                     // if we have had a key already and the new one is logically equal

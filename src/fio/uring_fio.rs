@@ -58,18 +58,18 @@ impl FioFS for UringFileSystem {
     }
 
     async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        trace!(?path, "Creating directory");
+        trace!(?path, "creating directory");
         tokio_uring::fs::create_dir_all(path).await
     }
 
     async fn sync_dir(&self, path: &Path) -> io::Result<()> {
-        trace!(?path, "Syncing directory");
+        trace!(?path, "syncing directory");
         let dir = tokio_uring::fs::File::open(path).await?;
         dir.sync_all().await
     }
 
     async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
-        trace!(?from, ?to, "Renaming file");
+        trace!(?from, ?to, "renaming file");
         tokio_uring::fs::rename(from, to).await
     }
 
@@ -77,7 +77,7 @@ impl FioFS for UringFileSystem {
         &self,
         path: &Path,
     ) -> io::Result<BoxStream<'static, io::Result<FioDirEntry>>> {
-        trace!(?path, "Reading directory");
+        trace!(?path, "reading directory");
         let read_dir = tokio::fs::read_dir(path).await?;
 
         // Unfold the read_dir stream, trying to retrieve every entry within

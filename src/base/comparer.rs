@@ -78,7 +78,7 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
         debug_assert_eq!(
             res,
             self.0.compare_physical(b, a).reverse(),
-            "Anti-symmetry violation: compare(a,b) != reverse(compare(b,a))"
+            "anti-symmetry violation: compare(a,b) != reverse(compare(b,a))"
         );
 
         // check for consistency with prefix:
@@ -92,14 +92,14 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
                 debug_assert_eq!(
                     res,
                     cmp::Ordering::Less,
-                    "Consistency violation: prefix(a) < prefix(b) but a >= b"
+                    "consistency violation: prefix(a) < prefix(b) but a >= b"
                 )
             }
             cmp::Ordering::Greater => {
                 debug_assert_eq!(
                     res,
                     cmp::Ordering::Greater,
-                    "Consistency violation: prefix(a) > prefix(b) but a <= b"
+                    "consistency violation: prefix(a) > prefix(b) but a <= b"
                 )
             }
             cmp::Ordering::Equal => {

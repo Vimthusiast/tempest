@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
-use bytes::Bytes;
 use futures::FutureExt;
 
 use crate::{
-    base::{DefaultComparer, InternalKey, TempestResult},
+    base::{DefaultComparer, TempestResult},
     fio::FioFS,
     silo::{SiloHandle, SiloWorker, batch::WriteBatch},
 };
@@ -30,7 +29,7 @@ impl<F: FioFS> Tempest<F> {
     pub fn new(fs: F, root_dir: impl Into<PathBuf>) -> Self {
         let root_dir = root_dir.into();
 
-        info!("Creating tempest new instance");
+        info!("creating new tempest instance");
         Self {
             silo_handles: Vec::new(),
 
@@ -42,7 +41,7 @@ impl<F: FioFS> Tempest<F> {
     pub async fn start(mut self) -> TempestResult<()> {
         //let num_cpus = num_cpus::get() as u64;
         let num_workers = 1;
-        info!(num_workers, "Starting Tempest");
+        info!(num_workers, "starting Tempest");
 
         for id in 0..num_workers {
             let handle =
@@ -60,7 +59,7 @@ impl<F: FioFS> Tempest<F> {
         let write_results = futures::future::join_all(write_futures).await;
         for (i, res) in write_results.into_iter().enumerate() {
             if let Err(err) = res {
-                error!("Could not write to silo {}: {}", i, err)
+                error!("could not write to silo {}: {}", i, err)
             }
         }
 

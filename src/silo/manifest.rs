@@ -142,7 +142,7 @@ impl SiloManifestHeader {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "Invalid magic number: not a manifest file. Expected {:?} but got {:?}.",
+                    "invalid magic number: not a manifest file. expected {:?} but got {:?}.",
                     SILO_MANIFEST_MAGICNUM, magic_bytes
                 ),
             ));
@@ -154,7 +154,7 @@ impl SiloManifestHeader {
         if computed_checksum != checksum {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Manifest header checksum mismatch: potential corruption",
+                "manifest header checksum mismatch: potential corruption",
             ));
         }
 
@@ -177,7 +177,7 @@ impl SiloManifestRecordPrefix {
     fn new(data: &[u8]) -> Self {
         assert!(
             data.len() <= u32::MAX as usize,
-            "Manifest record size may not exceed 2^32 bytes."
+            "manifest record size may not exceed 2^32 bytes."
         );
         let data_len = data.len() as u32;
         let checksum = crc64(0, data);
@@ -302,11 +302,13 @@ pub(super) struct SiloManifest<F: FioFS> {
 }
 
 impl<F: FioFS> SiloManifest<F> {
+    #[instrument(skip_all, level = "info")]
     pub(super) async fn init(fs: F, silo_root: PathBuf) -> TempestResult<Self> {
-        info!("Initializing silo manifest at {:?}", silo_root);
+        info!("initializing silo manifest at {:?}", silo_root);
         let manifest_dir = silo_root.join("manifest");
         fs.create_dir_all(&manifest_dir).await?;
 
+        info!("checking manifest directory for old manifests");
         let entries: Vec<_> = fs
             .read_dir(&manifest_dir)
             .await?
@@ -315,23 +317,19 @@ impl<F: FioFS> SiloManifest<F> {
             .await?;
 
         if !entries.is_empty() {
+            info!(
+                "found {} manifest files, attempting to get the latest one",
+                entries.len()
+            );
             let mut manifest_details: Vec<_> = futures::stream::iter(entries)
                 .map(|entry| {
                     let fs = fs.clone();
                     async move {
                         let path = entry.path().to_path_buf();
-                        let file = match fs
-                            .opts()
-                            .read(true)
-                            .write(true)
-                            // TODO: Should we set create and truncate instead of create_new?
-                            // => Less safe for the sake of correctness, but recovers better
-                            .open(&path)
-                            .await
-                        {
+                        let file = match fs.opts().read(true).write(true).open(&path).await {
                             Ok(f) => f,
                             Err(e) => {
-                                warn!("Could not open manifest file {:?}, skipping", path);
+                                warn!("could not open manifest file {:?}, skipping", path);
                                 return Err(e.into());
                             }
                         };
@@ -339,7 +337,7 @@ impl<F: FioFS> SiloManifest<F> {
                         let buf = BytesMut::zeroed(SILO_MANIFEST_HEADER_SIZE);
                         let (res, buf) = file.read_exact_at(buf, 0).await;
                         if let Err(e) = res {
-                            warn!("Could not read header for file {:?}", path);
+                            warn!("could not read header for file {:?}", path);
                             return Err(e.into());
                         }
 
@@ -348,7 +346,7 @@ impl<F: FioFS> SiloManifest<F> {
                             match SiloManifestHeader::decode(buf.as_ref().try_into().unwrap()) {
                                 Ok(h) => h,
                                 Err(e) => {
-                                    warn!("Could not decode header for file {:?}", path);
+                                    warn!("could not decode header for file {:?}", path);
                                     return Err(e.into());
                                 }
                             };
@@ -364,7 +362,6 @@ impl<F: FioFS> SiloManifest<F> {
             manifest_details.sort_by_key(|(filenum, _, _)| *filenum);
 
             if let Some((highest_filenum, path, file)) = manifest_details.pop() {
-                info!(highest_filenum, ?path, "Found latest manifest");
                 let file_size = file.size().await?;
                 let mut current_filepos = SILO_MANIFEST_HEADER_SIZE as u64;
                 let mut scratch = BytesMut::with_capacity(4096);
@@ -376,6 +373,12 @@ impl<F: FioFS> SiloManifest<F> {
                 let mut filenum_limit = highest_filenum;
                 let mut ssts: Vec<SstMetadata> = Vec::new();
 
+                debug!(
+                    highest_filenum,
+                    file_size,
+                    ?path,
+                    "found latest manifest file, starting read"
+                );
                 while current_filepos < file_size {
                     let res;
                     (res, scratch) = Self::read_framed_edit(scratch, &file, current_filepos).await;
@@ -386,14 +389,14 @@ impl<F: FioFS> SiloManifest<F> {
                                 ?path,
                                 ?current_filepos,
                                 ?file_size,
-                                "Could not read manifest edit: {}, reconstructing from remaining data",
+                                "could not read manifest edit: {}, reconstructing from remaining data",
                                 e
                             );
                             had_error = true;
                             break;
                         }
                     };
-                    trace!("Got edit from manifest: {:?}", edit);
+                    trace!("got edit from manifest: {:?}", edit);
                     current_filepos += bytes_read;
                     let edit = edit.into_latest();
 
@@ -414,6 +417,12 @@ impl<F: FioFS> SiloManifest<F> {
                         ssts.extend(added);
                     }
                 }
+                info!(
+                    seqnum_limit = seqnum_limit.get(),
+                    filenum_limit,
+                    ssts = ssts.len(),
+                    "finished reading in manifest file",
+                );
 
                 let mut res = Self {
                     silo_root,
@@ -440,15 +449,17 @@ impl<F: FioFS> SiloManifest<F> {
 
                 if had_error {
                     info!(
-                        "Writing to a new manifest file, after encountering error when decoding manifest body"
+                        "writing to a new manifest file, after encountering error when decoding manifest body"
                     );
                     res.write_to_new_file().await?;
                 }
 
+                info!("finished initializing manifest");
                 return Ok(res);
             }
         }
 
+        info!("no manifest file found, creating new file");
         // this is the initial manifest file number
         let filenum = 0;
 
@@ -458,16 +469,13 @@ impl<F: FioFS> SiloManifest<F> {
             .opts()
             .read(true)
             .write(true)
-            // TODO: Should we set create and truncate instead of create_new?
-            // => Less safe for the sake of correctness, but recovers better
-            .create_new(true)
+            .create(true)
+            .truncate(true)
             .open(filepath)
             .await?;
 
         // initialize the scratch buffer
         let scratch = BytesMut::with_capacity(4096);
-
-        // write the initial version to disk
 
         // create initial edit
         let filenum_limit = filenum + FILENUM_LIMIT_STEP;
@@ -483,6 +491,7 @@ impl<F: FioFS> SiloManifest<F> {
         // sync file for durability
         file.sync_all().await?;
 
+        info!("finished initializing manifest");
         let initial_file_size = filepos;
         let filenum_current = filenum + 1;
         Ok(Self {
@@ -509,7 +518,7 @@ impl<F: FioFS> SiloManifest<F> {
     }
 
     pub(super) async fn shutdown(&mut self) -> TempestResult<()> {
-        assert!(!self.is_shutdown, "Silo has been shut down");
+        assert!(!self.is_shutdown, "silo has been shut down");
 
         // tighten down seqnum and filenum limit
         let final_edit = ManifestEdit::V1(ManifestEditV1 {
@@ -533,12 +542,12 @@ impl<F: FioFS> SiloManifest<F> {
         self.seqnum_limit = self.seqnum_current;
         self.filenum_limit = self.filenum_current;
 
-        info!("Silo manifest shut down cleanly");
+        info!("silo manifest shut down cleanly");
         Ok(())
     }
 
     async fn write_to_new_file(&mut self) -> TempestResult<()> {
-        assert!(!self.is_shutdown, "Silo has been shut down");
+        assert!(!self.is_shutdown, "silo has been shut down");
         let (filenum_range, filenum_limit) = self.calculate_filenum_range(1)?;
         let filenum = filenum_range.start;
 
@@ -550,9 +559,10 @@ impl<F: FioFS> SiloManifest<F> {
             .opts()
             .read(true)
             .write(true)
-            // TODO: Should we set create and truncate instead of create_new?
-            // => Less safe for the sake of correctness, but recovers better
-            .create_new(true)
+            // NB: We set create and truncate instead of create_new here,
+            // which may be 'less safe' in a way, but recovers better in practice
+            .create(true)
+            .truncate(true)
             .open(&filepath)
             .await?;
 
@@ -579,7 +589,7 @@ impl<F: FioFS> SiloManifest<F> {
         trace!(
             seqnum_limit=?self.seqnum_limit, filenum_limit=self.filenum_limit,
             ?filepath, filenum, bytes_written,
-            "Wrote manifest to new file",
+            "wrote manifest to new file",
         );
         Ok(())
     }
@@ -593,6 +603,7 @@ impl<F: FioFS> SiloManifest<F> {
         filenum: u64,
         initial_edit: &ManifestEdit,
     ) -> (TempestResult<u64>, BytesMut) {
+        debug!(filenum, "writing manifest to new file");
         // clear scratch buffer
         scratch.clear();
 
@@ -618,6 +629,7 @@ impl<F: FioFS> SiloManifest<F> {
     }
 
     /// Writes a new framed edit into a file. Returns the number of bytes written.
+    #[instrument(skip(edit, scratch, file), level = "trace")]
     async fn write_framed_edit(
         edit: &ManifestEdit,
         mut scratch: BytesMut,
@@ -667,6 +679,7 @@ impl<F: FioFS> SiloManifest<F> {
         Ok(())
     }
 
+    #[instrument(skip(scratch, file), level = "trace")]
     async fn read_framed_edit(
         mut scratch: BytesMut,
         file: &<F as FioFS>::File,
@@ -682,7 +695,7 @@ impl<F: FioFS> SiloManifest<F> {
         trace!(
             buf_len = scratch.len(),
             buf_cap = scratch.capacity(),
-            "Trying to read manifest record prefix into scratch buffer"
+            "trying to read manifest record prefix into scratch buffer"
         );
         let (res, slice) = file
             .read_exact_at(scratch.slice(0..12), current_filepos)
@@ -698,7 +711,7 @@ impl<F: FioFS> SiloManifest<F> {
         trace!(
             data_len = prefix.data_len,
             checksum = prefix.checksum,
-            "Read and decoded manifest record prefix"
+            "read and decoded manifest record prefix"
         );
 
         // reconstruct the inner buffer from the sliced view
@@ -721,7 +734,7 @@ impl<F: FioFS> SiloManifest<F> {
             return (
                 Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Manifest record prefix body was corrupted.",
+                    "manifest record prefix body was corrupted.",
                 )
                 .into()),
                 slice.into_inner(),
@@ -813,7 +826,7 @@ impl<F: FioFS> SiloManifest<F> {
         if self.current_filepos > threshold {
             trace!(
                 current = self.current_filepos,
-                threshold, "Rotating manifest file"
+                threshold, "rotating manifest file"
             );
             self.write_to_new_file().await?;
         }
@@ -950,11 +963,11 @@ mod tests {
                     .await?;
                 first_seqnum_range = response.seqnum_range;
                 manifest.shutdown().await?;
-                info!("First manifest final state: {:#?}", manifest);
+                info!("first manifest final state: {:#?}", manifest);
                 let range_size = first_seqnum_range.end.get() - first_seqnum_range.start.get();
                 assert_eq!(
                     range_size, seqnums_needed,
-                    "Requested {} seqnums, but got {}",
+                    "requested {} seqnums, but got {}",
                     seqnums_needed, range_size,
                 );
             }
@@ -968,18 +981,18 @@ mod tests {
                     .await?;
                 second_seqnum_range = resp.seqnum_range;
                 manifest.shutdown().await?;
-                info!("Second manifest final state: {:#?}", manifest);
+                info!("second manifest final state: {:#?}", manifest);
                 let range_size = second_seqnum_range.end.get() - second_seqnum_range.start.get();
                 assert_eq!(
                     range_size, seqnums_needed,
-                    "Requested {} seqnums, but got {}",
+                    "requested {} seqnums, but got {}",
                     seqnums_needed, range_size,
                 );
             }
 
             assert_eq!(
                 first_seqnum_range.end, second_seqnum_range.start,
-                "Seqnum ranges should be continuous, got {:?} and {:?}",
+                "seqnum ranges should be continuous, got {:?} and {:?}",
                 first_seqnum_range, second_seqnum_range,
             );
 

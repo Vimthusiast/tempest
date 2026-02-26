@@ -22,7 +22,7 @@ impl<C: Comparer> MemTable<C> {
         trace!(
             key_kind = ?key.trailer().kind(), key_len = key.key().len(),
             key=?key.key(), ?value, seqnum=key.trailer().seqnum().get(),
-            "Inserting kv pair into memtable",
+            "inserting kv pair into memtable",
         );
         self.map.insert(key, value);
     }

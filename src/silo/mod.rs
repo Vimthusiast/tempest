@@ -9,7 +9,7 @@
 //! **performance** and allows us to utilize certain Linux kernel features, such as **io_uring**,
 //! which is bound to be used on one thread by implementation, i.e. most types are !Send.
 
-use std::{ops::ControlFlow, path::PathBuf, sync::Arc, thread};
+use std::{path::PathBuf, sync::Arc, thread};
 
 use crate::{
     base::{
@@ -67,7 +67,7 @@ fn read_varint(src: &[u8]) -> Option<(usize, usize)> {
 
 impl<F: FioFS, C: Comparer> Silo<F, C> {
     pub(crate) async fn init(id: u64, fs: F, root_dir: impl Into<PathBuf>) -> TempestResult<Self> {
-        info!("Initializing silo");
+        info!("initializing silo");
         let root_dir = root_dir.into();
 
         // initialize manifest
@@ -102,10 +102,10 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
     #[instrument(skip_all, level = "debug")]
     pub(crate) async fn write(&mut self, mut batch: WriteBatch) -> TempestResult<()> {
-        trace!("Writing batch: {:?}", batch);
+        trace!("writing batch: {:?}", batch);
         let seqnum = self.get_seqnum().await?;
         batch.commit(seqnum);
-        trace!(seqnum = seqnum.get(), "Batch stamped with seqnum");
+        trace!(seqnum = seqnum.get(), "batch stamped with seqnum");
 
         let mut body = batch.take_buf().freeze();
         let header = body.split_to(12);
@@ -118,7 +118,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         // TODO: verify remaining length along the way, to prevent panics if batch is malformed
         let mut pairs: Vec<(KeyKind, Bytes, Bytes)> = Vec::new();
         for idx in 0..count {
-            trace!(idx, "Reading entry");
+            trace!(idx, "reading entry");
 
             // get kind
             let kind_byte = body.split_to(1)[0];
@@ -131,7 +131,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
             // get key
             let key = body.split_to(key_len);
-            trace!(?kind, key_len, ?key, idx, "Got key");
+            trace!(?kind, key_len, ?key, idx, "got key");
 
             match kind {
                 KeyKind::Delete => {
@@ -145,7 +145,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
                     // get value
                     let value = body.split_to(value_len);
-                    trace!(value_len, ?value, idx, "Got value");
+                    trace!(value_len, ?value, idx, "got value");
 
                     pairs.push((kind, key, value));
                 }
@@ -217,7 +217,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 impl<F: FioFS, C: Comparer> Drop for Silo<F, C> {
     fn drop(&mut self) {
         if !self.is_shutdown {
-            error!(id=self.id, "silo was not shut down correctly!");
+            error!(id = self.id, "silo was not shut down correctly!");
         }
     }
 }
@@ -282,12 +282,12 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
 
         thread::spawn(move || {
             let _worker_entered = span!(Level::INFO, "silo-worker", id).entered();
-            info!(id, ?root_dir, "Spawning silo worker");
+            info!(id, ?root_dir, "spawning silo worker");
             // Specify core affinity for this worker
             core_affinity::set_for_current(core_affinity::CoreId { id: id as usize });
 
             let result = tokio_uring::start(async move {
-                info!(id, "Initialized tokio-uring runtime");
+                info!(id, "initialized tokio-uring runtime");
                 let silo = Silo::<F, C>::init(id, fs, silo_dir).await?;
                 let mut worker = SiloWorker { silo, receiver };
                 worker.start().await;
@@ -295,7 +295,7 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
                 Ok::<_, TempestError>(())
             });
             if let Err(err) = result {
-                error!("Silo worker crashed: {}", err);
+                error!("silo worker crashed: {}", err);
             }
         });
 
@@ -303,18 +303,18 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
     }
 
     async fn start(&mut self) {
-        info!("Starting silo worker");
+        info!("starting silo worker");
         let respond_to = loop {
             let control_flow = match self.receiver.recv().await {
                 Some(cmd) => match self.handle_command(cmd).await {
                     Ok(cf) => cf,
                     Err(err) => {
-                        error!("Could not handle command: {}", err);
+                        error!("could not handle command: {}", err);
                         break None;
                     }
                 },
                 None => {
-                    info!("Channel closed. Exiting");
+                    info!("channel closed. exiting");
                     break None;
                 }
             };
@@ -322,7 +322,7 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
             match control_flow {
                 CommandControlFlow::Continue => continue,
                 CommandControlFlow::Shutdown { respond_to } => {
-                    info!("Shutdown has been requested");
+                    info!("shutdown has been requested");
                     break Some(respond_to);
                 }
             }
@@ -331,12 +331,12 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
         let result = self.silo.shutdown().await;
         if let Some(tx) = respond_to {
             if let Err(_) = tx.send(result) {
-                error!("Could not send shutdown confirmation: Channel closed");
+                error!("could not send shutdown confirmation: channel closed");
             }
         } else {
             match result {
-                Ok(()) => info!("Successfully shut down."),
-                Err(err) => error!("Could not shut down correctly: {}", err),
+                Ok(()) => info!("successfully shut down."),
+                Err(err) => error!("could not shut down correctly: {}", err),
             }
         }
     }
@@ -347,10 +347,10 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
             SiloCommand::Write { batch, respond_to } => {
                 let result = self.silo.write(batch).await;
                 if let Err(e) = result.as_ref() {
-                    error!("Failed to execute write command: {}", e);
+                    error!("failed to execute write command: {}", e);
                 }
                 if let Err(_) = respond_to.send(result) {
-                    error!("Could not respond to write command: Channel closed");
+                    error!("could not respond to write command: channel closed");
                 }
                 Ok(CommandControlFlow::Continue)
             }
@@ -408,7 +408,7 @@ mod tests {
 
                     // shut down silo
                     silo.shutdown().await?;
-                    info!("First silo after shutdown: {:#?}", silo);
+                    info!("first silo after shutdown: {:#?}", silo);
                 }
 
                 {
@@ -440,14 +440,14 @@ mod tests {
 
                     // shut down silo
                     silo.shutdown().await?;
-                    info!("Second silo after shutdown: {:#?}", silo);
+                    info!("second silo after shutdown: {:#?}", silo);
                 }
 
                 Ok::<(), TempestError>(())
             }
             .instrument(silo_span),
         ) {
-            error!("Silo test failed: {}", err);
+            error!("silo test failed: {}", err);
             panic!("{}", err);
         }
     }
@@ -505,7 +505,7 @@ mod tests {
                 drop(scanner);
 
                 // --- Assertions ---
-                assert_eq!(results.len(), 2, "Should have 2 unique logical keys");
+                assert_eq!(results.len(), 2, "should have 2 unique logical keys");
 
                 // key_a: versioned by seqnum, highest (newest) should win
                 assert_eq!(results[0].0, "key_a");

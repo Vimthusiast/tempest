@@ -10,14 +10,14 @@ async fn main() -> TempestResult<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    info!("All your storage are belong to us!");
+    info!("all your storage are belong to us!");
 
     let fs = UringFileSystem;
     let root_dir = "./data";
 
     Tempest::new(fs, root_dir).start().await?;
 
-    info!("Exited");
+    info!("exited");
     tokio::signal::ctrl_c().await?;
     Ok(())
 }
