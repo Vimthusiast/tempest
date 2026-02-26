@@ -211,7 +211,7 @@ impl SiloManifestRecordPrefix {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct ManifestRequest {
     pub ssts_added: Vec<SstMetadata>,
     pub ssts_removed: Vec<SstDeletion>,
@@ -796,6 +796,7 @@ impl<F: FioFS> SiloManifest<F> {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub(super) async fn handle_request(
         &mut self,
         req: ManifestRequest,

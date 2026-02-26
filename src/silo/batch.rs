@@ -80,6 +80,17 @@ impl WriteBatch {
         }
     }
 
+    pub fn new_from_wal(buf: BytesMut) -> Self {
+        Self {
+            // contains our checked data
+            buf,
+            // count does not matter, as it has already been written to the buf
+            count: 0,
+            // this comes from the wal, so it has already been committed
+            committed: true,
+        }
+    }
+
     /// Add a `put KEY=VALUE` command to this batch.
     pub fn put(&mut self, key: &[u8], value: &[u8]) {
         trace!("WriteBatch: put '{:?}'='{:?}'", key, value);

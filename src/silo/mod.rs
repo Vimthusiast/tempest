@@ -9,11 +9,7 @@
 //! **performance** and allows us to utilize certain Linux kernel features, such as **io_uring**,
 //! which is bound to be used on one thread by implementation, i.e. most types are !Send.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    thread,
-};
+use std::{ops::ControlFlow, path::PathBuf, sync::Arc, thread};
 
 use crate::{
     base::{
@@ -26,16 +22,14 @@ use crate::{
         iterator::{DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry},
         manifest::SiloManifest,
         memtable::MemTable,
+        wal::SiloWal,
     },
 };
 
 use bytes::{Buf, Bytes};
 use integer_encoding::VarInt;
-use tokio::{
-    select,
-    sync::{mpsc, oneshot},
-};
-use tracing::{Instrument, Level, instrument};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{Level, instrument};
 
 pub mod batch;
 pub mod iterator;
@@ -52,6 +46,9 @@ pub(crate) struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
 
     /// The manifest that manages state of this silo.
     manifest: SiloManifest<F>,
+
+    /// The write-ahead log that ensure durability of writes to this silo.
+    wal: SiloWal<F>,
 
     /// The currently active memtable.
     active: MemTable<C>,
@@ -74,7 +71,10 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         let root_dir = root_dir.into();
 
         // initialize manifest
-        let manifest = SiloManifest::init(fs, root_dir.clone()).await?;
+        let manifest = SiloManifest::init(fs.clone(), root_dir.clone()).await?;
+
+        // initialize wal
+        let wal = SiloWal::new(fs, root_dir.clone());
 
         // initialize memtables
         let active = MemTable::new();
@@ -84,7 +84,9 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             id,
             root_dir,
 
+            // -- manager components --
             manifest,
+            wal,
 
             active,
             immutables,
@@ -116,7 +118,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         // TODO: verify remaining length along the way, to prevent panics if batch is malformed
         let mut pairs: Vec<(KeyKind, Bytes, Bytes)> = Vec::new();
         for idx in 0..count {
-            trace!("Reading entry #{}", idx);
+            trace!(idx, "Reading entry");
 
             // get kind
             let kind_byte = body.split_to(1)[0];
@@ -196,24 +198,27 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         unsafe { SeqNum::new_unchecked(self.manifest.seqnum_current().get() - 1) }
     }
 
+    #[instrument(skip_all)]
     pub async fn shutdown(&mut self) -> TempestResult<()> {
         assert!(!self.is_shutdown);
+        // NB: Set this to true, even if this function may return an error,
+        // since we may shut down partially, which means we don't want to call shutdown again,
+        // even though it did not complete the process
+        self.is_shutdown = true;
 
         // shutdown manifest, to free unused seqnums
         self.manifest.shutdown().await?;
+        info!("shut down manifest");
 
-        self.is_shutdown = true;
         Ok(())
     }
 }
 
 impl<F: FioFS, C: Comparer> Drop for Silo<F, C> {
     fn drop(&mut self) {
-        assert!(
-            self.is_shutdown,
-            "Silo #{} was not shut down correctly!",
-            self.id
-        );
+        if !self.is_shutdown {
+            error!(id=self.id, "silo was not shut down correctly!");
+        }
     }
 }
 
@@ -232,14 +237,34 @@ impl SiloHandle {
             .await?;
         rx.await?
     }
+
+    pub(crate) async fn shutdown(&self) -> TempestResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(SiloCommand::Shutdown { respond_to: tx })
+            .await?;
+        rx.await?
+    }
 }
 
+#[derive(Debug)]
 pub enum SiloCommand {
     Write {
         batch: WriteBatch,
         respond_to: oneshot::Sender<TempestResult<()>>,
     },
     Scan {},
+    Shutdown {
+        respond_to: oneshot::Sender<TempestResult<()>>,
+    },
+}
+
+#[derive(Debug)]
+pub enum CommandControlFlow {
+    Continue,
+    Shutdown {
+        respond_to: oneshot::Sender<TempestResult<()>>,
+    },
 }
 
 /// A background worker that can be controlled through channel commands and manages a [`Silo`].
@@ -265,7 +290,7 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
                 info!(id, "Initialized tokio-uring runtime");
                 let silo = Silo::<F, C>::init(id, fs, silo_dir).await?;
                 let mut worker = SiloWorker { silo, receiver };
-                worker.start().await?;
+                worker.start().await;
 
                 Ok::<_, TempestError>(())
             });
@@ -277,27 +302,47 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
         SiloHandle { sender }
     }
 
-    async fn start(&mut self) -> TempestResult<()> {
+    async fn start(&mut self) {
         info!("Starting silo worker");
-        loop {
-            match self.receiver.recv().await {
-                Some(cmd) => {
-                    if let Err(err) = self.handle_command(cmd).await {
+        let respond_to = loop {
+            let control_flow = match self.receiver.recv().await {
+                Some(cmd) => match self.handle_command(cmd).await {
+                    Ok(cf) => cf,
+                    Err(err) => {
                         error!("Could not handle command: {}", err);
-                        break;
+                        break None;
                     }
-                }
+                },
                 None => {
-                    info!("Silo worker channel closed. Exiting");
-                    break;
+                    info!("Channel closed. Exiting");
+                    break None;
+                }
+            };
+
+            match control_flow {
+                CommandControlFlow::Continue => continue,
+                CommandControlFlow::Shutdown { respond_to } => {
+                    info!("Shutdown has been requested");
+                    break Some(respond_to);
                 }
             }
+        };
+
+        let result = self.silo.shutdown().await;
+        if let Some(tx) = respond_to {
+            if let Err(_) = tx.send(result) {
+                error!("Could not send shutdown confirmation: Channel closed");
+            }
+        } else {
+            match result {
+                Ok(()) => info!("Successfully shut down."),
+                Err(err) => error!("Could not shut down correctly: {}", err),
+            }
         }
-        self.silo.shutdown().await?;
-        Ok(())
     }
 
-    async fn handle_command(&mut self, cmd: SiloCommand) -> TempestResult<()> {
+    #[instrument(skip_all)]
+    async fn handle_command(&mut self, cmd: SiloCommand) -> TempestResult<CommandControlFlow> {
         match cmd {
             SiloCommand::Write { batch, respond_to } => {
                 let result = self.silo.write(batch).await;
@@ -307,9 +352,10 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
                 if let Err(_) = respond_to.send(result) {
                     error!("Could not respond to write command: Channel closed");
                 }
-                Ok(())
+                Ok(CommandControlFlow::Continue)
             }
             SiloCommand::Scan {} => todo!(),
+            SiloCommand::Shutdown { respond_to } => Ok(CommandControlFlow::Shutdown { respond_to }),
         }
     }
 }
