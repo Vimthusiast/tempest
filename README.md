@@ -29,7 +29,7 @@ rethink my architecture and moved away from a [CockroachDB] inspired multi-threa
 synchronization primitives all over the place towards a **Shared-nothing** approach, that has been proven
 to be easier to get right (in some places!) as well as more performant, proven by modern system engineering
 marvels, like [ScyllaDB] and the more recent [TigerBeetle].
-I've also head that [Redpanda] uses the same architecture, to get 10x higher performance that the old [Kafka],
+I've also head that [Redpanda] uses the same architecture, to get 10x higher performance than the old [Apache Kafka],
 though it seems to be a JVM -> C++ advantage as well.
 
 ## TQL Syntax Examples
