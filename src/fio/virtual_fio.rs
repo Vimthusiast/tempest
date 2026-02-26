@@ -10,7 +10,7 @@ use futures::{StreamExt, stream::BoxStream};
 use tokio::sync::RwLock;
 use tokio_uring::buf::{BoundedBuf, BoundedBufMut};
 
-use crate::fio::{FioDirEntry, FioFS, FioFile};
+use crate::fio::{FioDirEntry, FioFS, FioFile, OpenOptions};
 
 #[derive(Debug, Default)]
 #[debug("VirtualFile({:p})", Arc::as_ptr(_0))]
@@ -141,27 +141,47 @@ impl VirtualFileSystem {
 impl FioFS for VirtualFileSystem {
     type File = VirtualFile;
 
-    async fn open(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
-        let path = path.as_ref();
+    // TODO: Use opts within the file to check if accesses are valid?
+    // TODO: Allow for opening directories as files (like on unix)?
+    // TODO: Allow for retrieving the file path from the file handle?
+    async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File> {
         let path = Self::normalize(path);
         trace!("Opening file {:?}", path);
-        let files = self.files.read().await;
-        let data = files
-            .get(&path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "File not found"))?;
-
-        Ok(VirtualFile::new(data.clone()))
-    }
-
-    async fn create(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
-        let path = path.as_ref();
-        let path = Self::normalize(path);
-        trace!("Creating file {:?}", path);
-        let mut files = self.files.write().await;
-        let data = Arc::new(RwLock::new(Vec::new()));
-        files.insert(path, data.clone());
-
-        Ok(VirtualFile::new(data))
+        let requires_mutable = opts.create_new || opts.create;
+        if requires_mutable {
+            let mut files = self.files.write().await;
+            if let Some(file) = files.get(&path) {
+                if opts.create_new {
+                    Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "File already exists",
+                    ))
+                } else {
+                    if opts.truncate {
+                        file.write().await.truncate(0);
+                    }
+                    Ok(VirtualFile(file.clone()))
+                }
+            } else {
+                if opts.create_new || opts.create {
+                    let file = Arc::new(RwLock::new(Vec::new()));
+                    files.insert(path, file.clone());
+                    Ok(VirtualFile(file))
+                } else {
+                    Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
+                }
+            }
+        } else {
+            let files = self.files.read().await;
+            if let Some(file) = files.get(&path) {
+                if opts.truncate {
+                    file.write().await.truncate(0);
+                }
+                Ok(VirtualFile(file.clone()))
+            } else {
+                Err(io::Error::new(io::ErrorKind::NotFound, "File not found"))
+            }
+        }
     }
 
     async fn create_dir_all(&self, path: &Path) -> io::Result<()> {
@@ -249,11 +269,11 @@ mod tests {
         let data: &[u8] = "hello world".as_ref();
 
         // Create and write
-        let file = vfs.create(path).await.unwrap();
+        let file = vfs.opts().create(true).open(path).await.unwrap();
         file.write_all_at(Bytes::from(data), 0).await.0.unwrap();
 
         // Open via different but equivalent path
-        let file_rel = vfs.open(path_rel).await.unwrap();
+        let file_rel = vfs.opts().read(true).open(path_rel).await.unwrap();
         let buf = BytesMut::zeroed(data.len());
         let (res, buf) = file_rel.read_exact_at(buf, 0).await;
         res.unwrap();
@@ -269,7 +289,13 @@ mod tests {
         let data = b"log data".as_ref();
 
         // Create and write to file
-        let file = vfs.create(old_path).await.unwrap();
+        let file = vfs
+            .opts()
+            .write(true)
+            .create(true)
+            .open(old_path)
+            .await
+            .unwrap();
         file.write_all_at(Bytes::from(data), 0).await.0.unwrap();
 
         // Rename file and sync parent directory
@@ -277,10 +303,10 @@ mod tests {
         vfs.sync_dir(&PathBuf::from("/")).await.unwrap();
 
         // Old file should be gone
-        assert!(vfs.open(old_path).await.is_err());
+        assert!(vfs.opts().open(old_path).await.is_err());
 
         // New file should have data
-        let file = vfs.open(new_path).await.unwrap();
+        let file = vfs.opts().read(true).open(new_path).await.unwrap();
         let buf = BytesMut::zeroed(data.len());
         let (res, buf) = file.read_exact_at(buf, 0).await;
         res.unwrap();
@@ -291,14 +317,20 @@ mod tests {
     async fn test_positional_overwrite_and_holes() {
         let vfs = VirtualFileSystem::default();
         let path = Path::new("sparse.bin");
-        let file = vfs.create(path).await.unwrap();
+        let file = vfs
+            .opts()
+            .write(true)
+            .create(true)
+            .open(path)
+            .await
+            .unwrap();
         let data = b"ABC".as_ref();
 
         // Write "AAA" at offset 5. This should automatically resize the VFS vec
         // and leave indices 0..5 as zeros (creating a "hole").
         file.write_all_at(Bytes::from(data), 5).await.0.unwrap();
 
-        let read_file = vfs.open(path).await.unwrap();
+        let read_file = vfs.opts().read(true).open(path).await.unwrap();
         assert_eq!(read_file.size().await.unwrap(), 8);
 
         let buf = BytesMut::zeroed(8);
@@ -312,7 +344,14 @@ mod tests {
     #[tokio::test]
     async fn test_read_out_of_bounds() {
         let vfs = VirtualFileSystem::default();
-        let file = vfs.create(Path::new("small.bin")).await.unwrap();
+        let file = vfs
+            .opts()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("small.bin")
+            .await
+            .unwrap();
 
         // Write 2 bytes
         file.write_all_at(Bytes::from(b"hi".as_ref()), 0)
@@ -333,14 +372,20 @@ mod tests {
         let vfs = VirtualFileSystem::default();
         // Path: /a/b/../c/./d.txt  => should be /a/c/d.txt
         let complex = Path::new("a/b/../c/./d.txt");
-        let file = vfs.create(complex).await.unwrap();
+        let file = vfs
+            .opts()
+            .write(true)
+            .create(true)
+            .open(complex)
+            .await
+            .unwrap();
         file.write_all_at(Bytes::from(b"nested".as_ref()), 0)
             .await
             .0
             .unwrap();
 
         let simple = Path::new("/a/c/d.txt");
-        let opened = vfs.open(simple).await.unwrap();
+        let opened = vfs.opts().open(simple).await.unwrap();
         assert_eq!(opened.size().await.unwrap(), 6);
     }
 
@@ -348,10 +393,10 @@ mod tests {
     async fn test_concurrent_read_write() {
         let vfs = VirtualFileSystem::default();
         let path = Path::new("shared.db");
-        vfs.create(path).await.unwrap();
+        vfs.opts().create(true).open(path).await.unwrap();
 
-        let writer = vfs.open(path).await.unwrap();
-        let reader = vfs.open(path).await.unwrap();
+        let writer = vfs.opts().write(true).open(path).await.unwrap();
+        let reader = vfs.opts().read(true).open(path).await.unwrap();
 
         // Write at offset 0
         writer
@@ -380,11 +425,14 @@ mod tests {
         .map(PathBuf::from);
 
         for path in files {
-            let file = vfs.create(&path).await.unwrap();
-            file.write_all_at(Bytes::from_static(b"test"), 0)
+            let file = vfs
+                .opts()
+                .write(true)
+                .create(true)
+                .open(&path)
                 .await
-                .0
                 .unwrap();
+            file.write_all_at(b"test".as_ref(), 0).await.0.unwrap();
         }
 
         let mut stream = vfs.read_dir(Path::new("/data")).await.unwrap();

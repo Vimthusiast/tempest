@@ -7,7 +7,7 @@ use futures::{
 };
 use tokio_uring::buf::{BoundedBuf, BoundedBufMut};
 
-use crate::fio::{FioDirEntry, FioFS, FioFile};
+use crate::fio::{FioDirEntry, FioFS, FioFile, OpenOptions};
 
 #[derive(Debug)]
 pub struct UringFile(tokio_uring::fs::File);
@@ -45,28 +45,16 @@ impl UringFileSystem {
 impl FioFS for UringFileSystem {
     type File = UringFile;
 
-    async fn open(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
-        let path = path.as_ref();
-        trace!(?path, "Opening file");
-        let file = tokio_uring::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
+    async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File> {
+        tokio_uring::fs::OpenOptions::new()
+            .read(opts.read)
+            .write(opts.write)
+            .create(opts.create)
+            .create_new(opts.create_new)
+            .truncate(opts.truncate)
             .open(path)
-            .await?;
-        Ok(UringFile(file))
-    }
-
-    async fn create(&self, path: impl AsRef<Path>) -> io::Result<Self::File> {
-        let path = path.as_ref();
-        trace!(?path, "Creating file");
-        let file = tokio_uring::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .await?;
-        Ok(UringFile(file))
+            .await
+            .map(|v| UringFile(v))
     }
 
     async fn create_dir_all(&self, path: &Path) -> io::Result<()> {

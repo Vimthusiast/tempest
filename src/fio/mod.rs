@@ -39,6 +39,58 @@ impl FioDirEntry {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct OpenOptions {
+    // TODO: We should consider using a bitmask here for efficiency
+    pub read: bool,
+    pub write: bool,
+    pub create: bool,
+    pub create_new: bool,
+    pub truncate: bool,
+}
+
+pub struct OpenBuilder<F: FioFS> {
+    fs: F,
+    opts: OpenOptions,
+}
+
+impl<F: FioFS> OpenBuilder<F> {
+    pub fn new(fs: F) -> Self {
+        let opts = OpenOptions::default();
+        Self { fs, opts }
+    }
+
+    pub fn read(&mut self, read: bool) -> &mut Self {
+        self.opts.read = read;
+        self
+    }
+
+    pub fn write(&mut self, write: bool) -> &mut Self {
+        self.opts.write = write;
+        self
+    }
+
+    pub fn create(&mut self, create: bool) -> &mut Self {
+        self.opts.create = create;
+        self
+    }
+
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self.opts.create_new = create_new;
+        self
+    }
+
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self.opts.truncate = truncate;
+        self
+    }
+
+    pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<F::File> {
+        let path = path.as_ref();
+        self.fs.open(path, &self.opts).await
+    }
+}
+
 /// # File I/O File Trait
 ///
 /// A trait that abstracts asynchronous I/O from the file system.
@@ -56,13 +108,14 @@ pub trait FioFS: Send + Sync + 'static + Clone {
     /// The representation of a single file in this file system.
     type File: FioFile;
 
+    fn opts(&self) -> OpenBuilder<Self> {
+        OpenBuilder::new(self.clone())
+    }
+
     /// Retrieve a [`Self::File`], which is just a thin handle, i.e. a [file descriptor].
     ///
     /// [file descriptor]: https://en.wikipedia.org/wiki/File_descriptor
-    async fn open(&self, path: impl AsRef<Path>) -> io::Result<Self::File>;
-
-    /// Create a new [`Self::File`], returning the handle.
-    async fn create(&self, path: impl AsRef<Path>) -> io::Result<Self::File>;
+    async fn open(&self, path: &Path, opts: &OpenOptions) -> io::Result<Self::File>;
 
     /// Recursively creates a directory and all of its parent components if they are missing.
     async fn create_dir_all(&self, path: &Path) -> io::Result<()>;

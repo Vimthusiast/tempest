@@ -320,7 +320,15 @@ impl<F: FioFS> SiloManifest<F> {
                     let fs = fs.clone();
                     async move {
                         let path = entry.path().to_path_buf();
-                        let file = match fs.open(&path).await {
+                        let file = match fs
+                            .opts()
+                            .read(true)
+                            .write(true)
+                            // TODO: Should we set create and truncate instead of create_new?
+                            // => Less safe for the sake of correctness, but recovers better
+                            .open(&path)
+                            .await
+                        {
                             Ok(f) => f,
                             Err(e) => {
                                 warn!("Could not open manifest file {:?}, skipping", path);
@@ -446,7 +454,15 @@ impl<F: FioFS> SiloManifest<F> {
 
         // open the initial file
         let filepath = manifest_dir.join(SiloManifestHeader::new(filenum).get_filename());
-        let file = fs.create(filepath).await?;
+        let file = fs
+            .opts()
+            .read(true)
+            .write(true)
+            // TODO: Should we set create and truncate instead of create_new?
+            // => Less safe for the sake of correctness, but recovers better
+            .create_new(true)
+            .open(filepath)
+            .await?;
 
         // initialize the scratch buffer
         let scratch = BytesMut::with_capacity(4096);
@@ -529,7 +545,16 @@ impl<F: FioFS> SiloManifest<F> {
         let header = SiloManifestHeader::new(filenum);
 
         let filepath = self.manifest_dir.join(header.get_filename());
-        let file = self.fs.create(&filepath).await?;
+        let file = self
+            .fs
+            .opts()
+            .read(true)
+            .write(true)
+            // TODO: Should we set create and truncate instead of create_new?
+            // => Less safe for the sake of correctness, but recovers better
+            .create_new(true)
+            .open(&filepath)
+            .await?;
 
         let scratch = self.scratch.take().expect("scatch buffer not taken yet");
 
