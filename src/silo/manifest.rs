@@ -326,27 +326,29 @@ impl<F: FioFS> SiloManifest<F> {
                         let file = match fs.opts().read(true).write(true).open(&path).await {
                             Ok(f) => f,
                             Err(e) => {
-                                warn!("could not open manifest file {:?}, skipping", path);
+                                warn!("could not open manifest file {:?}", path);
                                 return Err(e.into());
                             }
                         };
 
                         let buf = BytesMut::zeroed(SILO_MANIFEST_HEADER_SIZE);
-                        let (res, buf) = file.read_exact_at(buf, 0).await;
+                        let (res, sliced_buf) = file
+                            .read_exact_at(buf.slice(..SILO_MANIFEST_HEADER_SIZE), 0)
+                            .await;
+                        let buf = sliced_buf.into_inner();
                         if let Err(e) = res {
                             warn!("could not read header for file {:?}", path);
                             return Err(e.into());
                         }
 
                         // decode header
-                        let header =
-                            match SiloManifestHeader::decode(buf.as_ref().try_into().unwrap()) {
-                                Ok(h) => h,
-                                Err(e) => {
-                                    warn!("could not decode header for file {:?}", path);
-                                    return Err(e.into());
-                                }
-                            };
+                        let header = match SiloManifestHeader::decode(buf[..SILO_MANIFEST_HEADER_SIZE].try_into().unwrap()) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                warn!("could not decode header for file {:?}", path);
+                                return Err(e.into());
+                            }
+                        };
 
                         Ok::<_, TempestError>((header.filenum, path, file))
                     }
@@ -726,12 +728,11 @@ impl<F: FioFS> SiloManifest<F> {
         current_filepos += prefix.data_len as u64;
 
         // validate with checksum
-        let is_valid = prefix.is_valid_record(slice.as_ref());
-        if !is_valid {
+        if !prefix.is_valid_record(slice.as_ref()) {
             return (
                 Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "manifest record prefix body was corrupted.",
+                    "manifest record prefix checksum mismatch: potential corruption",
                 )
                 .into()),
                 slice.into_inner(),

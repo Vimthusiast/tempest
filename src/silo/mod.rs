@@ -78,13 +78,14 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         let mut filenums = filenum_range.into_iter();
 
         // initialize wal
-        let wal = SiloWal::init(fs, root_dir.clone(), filenums.next().unwrap()).await?;
+        let (wal, mut recovery_reader) =
+            SiloWal::init(fs, root_dir.clone(), filenums.next().unwrap()).await?;
 
         // initialize memtables
         let active = MemTable::new();
         let immutables = Vec::new();
 
-        Ok(Self {
+        let mut silo = Self {
             id,
             root_dir,
 
@@ -96,7 +97,24 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             immutables,
 
             is_shutdown: false,
-        })
+        };
+
+        while let Some(res) = recovery_reader.next().await {
+            // skip over errors
+            let data = match res {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("could not recover record from wal: {}, skipping", e);
+                    continue;
+                }
+            };
+            if let Err(e) = silo.apply_batch_to_memtable(data.freeze()) {
+                warn!("failed to apply batch to memtable: {}, skipping", e);
+            }
+        }
+
+        info!("finished initializing silo");
+        Ok(silo)
     }
 
     async fn get_seqnum(&mut self) -> TempestResult<SeqNum> {
@@ -111,17 +129,24 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         batch.commit(seqnum);
         trace!(seqnum = seqnum.get(), "batch stamped with seqnum");
 
-        let mut body = batch.take_buf().freeze();
+        let body = batch.take_buf().freeze();
 
         // -- persist in wal --
         trace!("persisting batch in wal");
         self.wal.append(body.clone()).await?;
 
         // -- commit to memtable --
+        // TODO: unwrap here? check validity first? maybe this is fine
+        self.apply_batch_to_memtable(body)?;
+
+        Ok(())
+    }
+
+    fn apply_batch_to_memtable(&mut self, mut body: Bytes) -> TempestResult<()> {
         let header = body.split_to(12);
 
         let seqnum_raw = u64::from_le_bytes(header[0..8].try_into().unwrap());
-        assert_eq!(seqnum_raw, seqnum.get());
+        let seqnum = seqnum_raw.try_into()?;
 
         let count = u32::from_le_bytes(header[8..12].try_into().unwrap());
 
@@ -168,7 +193,6 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             self.active.insert(key, value);
         }
 
-        // TODO: persist with WAL
         Ok(())
     }
 
@@ -372,7 +396,6 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
 
 #[cfg(test)]
 mod tests {
-    use bytes::BytesMut;
     use tracing::{Instrument, Level};
 
     use crate::{fio::VirtualFileSystem, silo::iterator::TempestIterator, tests::setup_tracing};
@@ -380,7 +403,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_silo() {
+    fn test_silo_basic() {
         setup_tracing();
 
         let id = 0;
@@ -408,7 +431,7 @@ mod tests {
                         Silo::init(id, fs.clone(), silo_dir).await?;
 
                     // create batched insert
-                    let mut batch = WriteBatch::new_in(BytesMut::with_capacity(4096));
+                    let mut batch = WriteBatch::new();
                     for (k, v) in &kvs {
                         batch.put(k, v);
                     }
@@ -426,8 +449,20 @@ mod tests {
                     let mut silo: Silo<_, DefaultComparer> =
                         Silo::init(id, fs.clone(), silo_dir).await?;
 
+                    // verify that all values were persisted
+                    for &(k, v) in &kvs {
+                        let found = silo.get(k.into(), silo.highest_seqnum()).await?;
+                        assert_eq!(
+                            found.as_deref(),
+                            Some(v),
+                            "expected {:?} to be {:?} after restart",
+                            k,
+                            v
+                        );
+                    }
+
                     // create batched insert
-                    let mut batch = WriteBatch::new_in(BytesMut::with_capacity(4096));
+                    let mut batch = WriteBatch::new();
 
                     // delete every second kv pair
                     for (i, &(k, _v)) in kvs.iter().enumerate() {
@@ -473,60 +508,93 @@ mod tests {
         let silo_span = span!(Level::INFO, "silo", id);
         tokio_uring::start(
             async {
-                let mut silo: Silo<_, DefaultComparer> =
-                    Silo::init(id, fs.clone(), silo_dir).await.unwrap();
+                {
+                    let mut silo: Silo<_, DefaultComparer> =
+                        Silo::init(id, fs.clone(), silo_dir).await.unwrap();
 
-                // 1. Write initial data and move to immutables
-                let mut batch1 = WriteBatch::new();
-                batch1.put(b"key_a", b"value_old");
-                silo.write(batch1).await.unwrap();
+                    // 1. Write initial data and move to immutables
+                    let mut batch1 = WriteBatch::new();
+                    batch1.put(b"key_a", b"value_old");
+                    silo.write(batch1).await.unwrap();
 
-                // Simulate flush freeze
-                let old_mem = std::mem::replace(&mut silo.active, MemTable::new());
-                silo.immutables.push(Arc::new(old_mem));
+                    // Simulate flush freeze
+                    let old_mem = std::mem::replace(&mut silo.active, MemTable::new());
+                    silo.immutables.push(Arc::new(old_mem));
 
-                // 2. Write an update to "key_a" and a new "key_b"
-                let mut batch2 = WriteBatch::new();
-                batch2.put(b"key_a", b"value_new");
-                batch2.put(b"key_b", b"value_b");
-                silo.write(batch2).await.unwrap();
+                    // 2. Write an update to "key_a" and a new "key_b"
+                    let mut batch2 = WriteBatch::new();
+                    batch2.put(b"key_a", b"value_new");
+                    batch2.put(b"key_b", b"value_b");
+                    silo.write(batch2).await.unwrap();
 
-                let mid_mem = std::mem::replace(&mut silo.active, MemTable::new());
-                silo.immutables.push(Arc::new(mid_mem));
+                    let mid_mem = std::mem::replace(&mut silo.active, MemTable::new());
+                    silo.immutables.push(Arc::new(mid_mem));
 
-                // 3. Delete "key_b" in the currently active memtable
-                let mut batch3 = WriteBatch::new();
-                batch3.delete(b"key_b");
-                silo.write(batch3).await.unwrap();
+                    // 3. Delete "key_b" in the currently active memtable
+                    let mut batch3 = WriteBatch::new();
+                    batch3.delete(b"key_b");
+                    silo.write(batch3).await.unwrap();
 
-                // --- Perform the Scan using the Beautiful Interface ---
-                let mut scanner = silo.scan();
-                let mut results = Vec::new();
+                    // --- Perform the Scan using the Beautiful Interface ---
+                    let mut scanner = silo.scan();
+                    let mut results = Vec::new();
 
-                // Clean async loop - no more manual Context or Poll matching!
-                while let Ok(Some(())) = scanner.next().await {
-                    let internal_key = scanner.key().unwrap();
-                    results.push((
-                        internal_key.key().clone(),
-                        scanner.value().unwrap().clone(),
-                        internal_key.trailer().kind(),
-                    ));
+                    // Clean async loop - no more manual Context or Poll matching!
+                    while let Ok(Some(())) = scanner.next().await {
+                        let internal_key = scanner.key().unwrap();
+                        results.push((
+                            internal_key.key().clone(),
+                            scanner.value().unwrap().clone(),
+                            internal_key.trailer().kind(),
+                        ));
+                    }
+                    drop(scanner);
+
+                    // --- Assertions ---
+                    assert_eq!(results.len(), 2, "should have 2 unique logical keys");
+
+                    // key_a: versioned by seqnum, highest (newest) should win
+                    assert_eq!(results[0].0, "key_a");
+                    assert_eq!(results[0].1, "value_new");
+                    assert_eq!(results[0].2, KeyKind::Put);
+
+                    // key_b: delete marker should shadow the put
+                    assert_eq!(results[1].0, "key_b");
+                    assert_eq!(results[1].2, KeyKind::Delete);
+
+                    silo.shutdown().await.unwrap();
                 }
-                drop(scanner);
 
-                // --- Assertions ---
-                assert_eq!(results.len(), 2, "should have 2 unique logical keys");
+                {
+                    // re-open and verify the same scan results hold after recovery
+                    let mut silo: Silo<_, DefaultComparer> =
+                        Silo::init(id, fs.clone(), silo_dir).await.unwrap();
 
-                // key_a: versioned by seqnum, highest (newest) should win
-                assert_eq!(results[0].0, "key_a");
-                assert_eq!(results[0].1, "value_new");
-                assert_eq!(results[0].2, KeyKind::Put);
+                    let mut scanner = silo.scan();
+                    let mut results = Vec::new();
+                    while let Ok(Some(())) = scanner.next().await {
+                        let internal_key = scanner.key().unwrap();
+                        results.push((
+                            internal_key.key().clone(),
+                            scanner.value().unwrap().clone(),
+                            internal_key.trailer().kind(),
+                        ));
+                    }
+                    drop(scanner);
 
-                // key_b: delete marker should shadow the put
-                assert_eq!(results[1].0, "key_b");
-                assert_eq!(results[1].2, KeyKind::Delete);
+                    assert_eq!(
+                        results.len(),
+                        2,
+                        "should have 2 unique logical keys after recovery"
+                    );
+                    assert_eq!(results[0].0, "key_a");
+                    assert_eq!(results[0].1, "value_new");
+                    assert_eq!(results[0].2, KeyKind::Put);
+                    assert_eq!(results[1].0, "key_b");
+                    assert_eq!(results[1].2, KeyKind::Delete);
 
-                silo.shutdown().await.unwrap();
+                    silo.shutdown().await.unwrap();
+                }
             }
             .instrument(silo_span),
         );

@@ -1,26 +1,20 @@
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crc64::crc64;
+use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio_uring::buf::BoundedBuf;
+use tracing::{Instrument, Level};
 
 use crate::{
-    base::{SILO_WAL_MAGICNUM, TempestResult},
+    base::{SILO_WAL_MAGICNUM, TempestError, TempestResult},
     fio::{FioFS, FioFile},
 };
 
-/// # Write-Ahead Log Header
-///
-/// The initial small header of WAL files, used to distinguish them from other files.
-/// Identifies the files based on their starting magic number and the silo-unique filenum.
-/// The total encoded length is equal to [`WAL_HEADER_SIZE`]:
-///
-/// ```not_rust
-/// +------------+--------------+
-/// | Magic (8B) | Filenum (8B) |
-/// +------------+--------------+
-/// ```
 #[derive(Debug)]
 pub struct WalHeader {
     filenum: u64,
@@ -63,16 +57,7 @@ impl WalHeader {
     }
 }
 
-/// # Write-Ahead Log Record Prefix
-///
 /// This frames WAL records using a checksum of the data and the data length.
-/// A single WAL record looks like this:
-///
-/// ```not_rust
-/// +---------------+----------+-- .... --+
-/// | Checksum (8B) | Len (4B) |  Record  |
-/// +---------------+----------+-- .... --+
-/// ```
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WalRecordPrefix {
     checksum: u64,
@@ -130,6 +115,238 @@ pub enum WalStatus {
 }
 
 #[derive(Debug)]
+pub struct WalFileReader<F: FioFile> {
+    file: F,
+    filepos: u64,
+    endpos: u64,
+    had_error: bool,
+    scratch: Option<BytesMut>,
+}
+
+impl<F: FioFile> WalFileReader<F> {
+    fn new(file: F, filepos: u64, endpos: u64) -> Self {
+        Self {
+            file,
+            filepos,
+            endpos,
+            had_error: false,
+            scratch: Some(BytesMut::with_capacity(16)),
+        }
+    }
+
+    pub(crate) async fn next(&mut self) -> Option<TempestResult<BytesMut>> {
+        if self.filepos >= self.endpos || self.had_error {
+            return None;
+        }
+        let scratch = self.scratch.take().expect("scratch buffer not taken yet");
+        let (res, scratch) =
+            Self::read_record(scratch, &self.file, self.filepos, self.endpos).await;
+        self.scratch = Some(scratch);
+        let (data, bytes_read) = match res {
+            Ok(v) => v,
+            Err(e) => {
+                // this will be empty, on the first error
+                self.had_error = true;
+                return Some(Err(e.into()));
+            }
+        };
+        self.filepos += bytes_read;
+        Some(Ok(data))
+    }
+
+    /// Returns the record data and the number of bytes read on success,
+    /// on an error if it failed. Always returns the scratch buffer back out.
+    #[instrument(skip_all)]
+    async fn read_record(
+        mut scratch: BytesMut,
+        file: &F,
+        filepos: u64,
+        endpos: u64,
+    ) -> (TempestResult<(BytesMut, u64)>, BytesMut) {
+        debug!(filepos, "reading from write-ahead log");
+
+        let mut current_pos = filepos;
+
+        // read the record prefix
+        if current_pos + SILO_WAL_RECORD_PREFIX_SIZE as u64 > endpos {
+            return (
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file").into()),
+                scratch,
+            );
+        }
+        scratch.resize(SILO_WAL_RECORD_PREFIX_SIZE, 0);
+        let sliced_scratch = scratch.slice(..SILO_WAL_RECORD_PREFIX_SIZE);
+        let (res, sliced_scratch) = file.read_exact_at(sliced_scratch, current_pos).await;
+        let scratch = sliced_scratch.into_inner();
+        if let Err(e) = res {
+            return (Err(e.into()), scratch);
+        }
+        let record_prefix = WalRecordPrefix::decode(scratch[..].try_into().unwrap());
+        debug!(
+            len = record_prefix.len,
+            checksum = record_prefix.checksum,
+            "got record prefix"
+        );
+        current_pos += SILO_WAL_RECORD_PREFIX_SIZE as u64;
+
+        if current_pos + record_prefix.len as u64 > endpos {
+            return (
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file").into()),
+                scratch,
+            );
+        }
+        let filebuf = BytesMut::zeroed(record_prefix.len as usize);
+        let sliced_filebuf = filebuf.slice(..record_prefix.len as usize);
+        let (res, sliced_filebuf) = file.read_exact_at(sliced_filebuf, current_pos).await;
+        let filebuf = sliced_filebuf.into_inner();
+        if let Err(e) = res {
+            return (Err(e.into()), scratch);
+        }
+        assert_eq!(filebuf.len(), record_prefix.len as usize);
+        current_pos += record_prefix.len as u64;
+
+        if !record_prefix.is_valid_record(&filebuf) {
+            return (
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "write-ahead log record prefix checksum mismatch: potential corruption",
+                )
+                .into()),
+                scratch,
+            );
+        }
+
+        let bytes_read = current_pos - filepos;
+        (Ok((filebuf, bytes_read)), scratch)
+    }
+}
+
+pub struct WalRecoveryReader<F: FioFS> {
+    sources: Vec<WalFileReader<<F as FioFS>::File>>,
+    pos: usize,
+}
+
+impl<F: FioFS> WalRecoveryReader<F> {
+    // TODO: Take in list of filenums to recover from manifest
+    #[instrument(skip_all)]
+    async fn recover(fs: F, dir: impl AsRef<Path>) -> TempestResult<Self> {
+        let dir = dir.as_ref();
+        info!(?dir, "creating wal recovery reader");
+        let entries: Vec<_> = fs
+            .read_dir(dir)
+            .await?
+            .try_filter(|e| futures::future::ready(!e.is_dir()))
+            .try_collect()
+            .await?;
+
+        if entries.len() > 0 {
+            info!("found {} wal files for recovery", entries.len());
+            let mut wal_details: Vec<_> = futures::stream::iter(entries)
+                .map(|e| {
+                    let fs = fs.clone();
+                    let span = span!(Level::DEBUG, "get-file-details", path=?e.path());
+                    async move {
+                        let file = match fs.opts().read(true).open(e.path()).await {
+                            Ok(f) => f,
+                            Err(e) => {
+                                error!("could not open wal file: {}", e);
+                                return Err(e.into());
+                            }
+                        };
+                        debug!("opened file");
+
+                        let buf = BytesMut::zeroed(SILO_WAL_HEADER_SIZE);
+                        let sliced_buf = buf.slice(..SILO_WAL_HEADER_SIZE);
+                        let (res, sliced_buf) = file.read_exact_at(sliced_buf, 0).await;
+                        if let Err(e) = res {
+                            error!("could not reader header: {}", e);
+                            return Err(e.into());
+                        }
+                        debug!("read header bytes");
+
+                        let header = match WalHeader::decode(
+                            sliced_buf.into_inner().as_ref().try_into().unwrap(),
+                        ) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                error!("could not decode header: {}", e);
+                                return Err(e.into());
+                            }
+                        };
+                        debug!(filenum = header.filenum, "decoded header");
+
+                        Ok::<_, TempestError>((header, file))
+                    }
+                    .instrument(span)
+                })
+                // run 10 reads at once
+                .buffer_unordered(10)
+                .try_collect()
+                .await?;
+
+            wal_details.sort_by_key(|(h, _f)| h.filenum);
+
+            let mut sources = Vec::new();
+            for (header, file) in wal_details {
+                let filepos = SILO_WAL_HEADER_SIZE as u64;
+                let size = file.size().await?;
+                debug!(
+                    filenum = header.filenum,
+                    size, "sourcing wal file through reader"
+                );
+                let reader = WalFileReader::new(file, filepos, size);
+                sources.push(reader)
+            }
+            Ok(Self { sources, pos: 0 })
+        } else {
+            let sources = Vec::new();
+            Ok(Self { sources, pos: 0 })
+        }
+    }
+
+    pub async fn next(&mut self) -> Option<TempestResult<BytesMut>> {
+        loop {
+            // check if we reached end
+            if self.pos >= self.sources.len() {
+                return None;
+            }
+            // get next value from sources
+            if let Some(result) = self.sources[self.pos].next().await {
+                return Some(result);
+            }
+            // advance if source is exhausted
+            self.pos += 1;
+        }
+    }
+}
+
+/// # Silo Write-Ahead Log
+///
+/// Ensures that writes are durable before being committed to the memtable of the LSM-Tree.
+///
+/// ## File Structure
+///
+/// The file is structured into a header, followed by a list of records with an arbitrary size.
+/// The initial header of WAL files is used to distinguish them from other files.
+/// It identifies the files based on their starting magic number and the silo-unique filenum.
+/// The total encoded length of the header is equal to [`WAL_HEADER_SIZE`].
+///
+/// ```not_rust
+/// +------------+--------------+-- ... --+
+/// | Magic (8B) | Filenum (8B) | Records |
+/// +------------+--------------+-- ... --+
+/// ```
+///
+/// Every record in the WAL has a CRC64 checksum for data integrity checks and a length, which is
+/// at most 4GiB. In the future, we should split up logical and physical WALs, so that a big record
+/// may span multiple files.
+///
+/// ```not_rust
+/// +---------------+----------+-- .. --+
+/// | Checksum (8B) | Len (4B) |  Data  |
+/// +---------------+----------+-- .. --+
+/// ```
+#[derive(Debug)]
 pub struct SiloWal<F: FioFS> {
     silo_dir: PathBuf,
     wal_dir: PathBuf,
@@ -146,14 +363,20 @@ pub struct SiloWal<F: FioFS> {
 pub const SILO_WAL_DIR_NAME: &str = "wal";
 pub const SILO_WAL_HEADER_SIZE: usize = 16;
 pub const SILO_WAL_RECORD_PREFIX_SIZE: usize = 12;
-pub const SILO_WAL_FILE_ROTATE_SIZE_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
+pub const SILO_WAL_FILE_ROTATE_FILE_SIZE_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
 pub const SILO_WAL_FILE_ROTATE_RECORD_COUNT_THRESHOLD: u32 = 10_000;
 
 impl<F: FioFS> SiloWal<F> {
-    pub(crate) async fn init(fs: F, silo_dir: PathBuf, filenum: u64) -> TempestResult<Self> {
+    pub(crate) async fn init(
+        fs: F,
+        silo_dir: PathBuf,
+        filenum: u64,
+    ) -> TempestResult<(Self, WalRecoveryReader<F>)> {
         let wal_dir = silo_dir.join(SILO_WAL_DIR_NAME);
         info!("initializing silo write-ahead log at {:?}", wal_dir);
         fs.create_dir_all(&wal_dir).await?;
+
+        let recovery_reader = WalRecoveryReader::recover(fs.clone(), &wal_dir).await?;
 
         let current_file_path = wal_dir.join(format!("{}.log", filenum));
         let current_file = fs
@@ -161,6 +384,7 @@ impl<F: FioFS> SiloWal<F> {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(current_file_path)
             .await?;
 
@@ -175,8 +399,7 @@ impl<F: FioFS> SiloWal<F> {
         }
         let scratch = sliced_scratch.into_inner();
 
-        info!("finished initializing write-ahead log");
-        Ok(Self {
+        let wal = Self {
             silo_dir,
             wal_dir,
 
@@ -186,11 +409,14 @@ impl<F: FioFS> SiloWal<F> {
             current_file,
             current_filepos: SILO_WAL_HEADER_SIZE as u64,
             current_record_count: 0,
-        })
+        };
+
+        info!("finished initializing write-ahead log");
+        Ok((wal, recovery_reader))
     }
 
     const fn get_status(&self) -> WalStatus {
-        let needs_rotation = self.current_filepos > SILO_WAL_FILE_ROTATE_SIZE_THRESHOLD
+        let needs_rotation = self.current_filepos > SILO_WAL_FILE_ROTATE_FILE_SIZE_THRESHOLD
             || self.current_record_count > SILO_WAL_FILE_ROTATE_RECORD_COUNT_THRESHOLD;
         if needs_rotation {
             WalStatus::NeedsRotation
@@ -257,19 +483,39 @@ impl<F: FioFS> SiloWal<F> {
         // return the new status
         Ok(self.get_status())
     }
-
-    #[instrument(skip_all)]
-    async fn read_record(file: &<F as FioFS>::File) -> TempestResult<()> {
-        todo!()
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::tests::setup_tracing;
+    use super::*;
+    use crate::{
+        fio::VirtualFileSystem,
+        tests::{filenum_gen, setup_tracing},
+    };
 
     #[tokio::test]
-    async fn test_silo_wal() {
+    async fn test_silo_wal() -> Result<(), Box<dyn std::error::Error>> {
         setup_tracing();
+
+        let fs = VirtualFileSystem::new();
+        let silo_dir = PathBuf::from("data/silo0");
+        let mut next_filenum = filenum_gen();
+        let data = Bytes::from_static(b"some-test-data");
+
+        {
+            let (mut wal, mut recovery_reader) =
+                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum()).await?;
+            wal.append(data.clone()).await?;
+            assert!(recovery_reader.next().await.is_none());
+        }
+
+        {
+            let (_, mut recovery_reader) =
+                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum()).await?;
+            assert_eq!(recovery_reader.next().await.unwrap().unwrap(), data);
+            assert!(recovery_reader.next().await.is_none());
+        }
+
+        Ok(())
     }
 }
