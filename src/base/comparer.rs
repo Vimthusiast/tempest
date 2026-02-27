@@ -85,7 +85,7 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
         // if a < b, then prefix(a) must be <= prefix(b)
         let split_a = self.0.split(a);
         let split_b = self.0.split(b);
-        let prefix_cmp = a[..split_a].cmp(&b[..split_b]);
+        let prefix_cmp = self.0.compare_prefix(&a[..split_a], &b[..split_b]);
 
         match prefix_cmp {
             cmp::Ordering::Less => {
