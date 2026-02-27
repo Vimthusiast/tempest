@@ -8,6 +8,8 @@ anything that has to do with changing my schema or querying for data.
 > caution, cause it may end up being `reject()`ed 😉 later. I mainly started this out, wanting to
 > learn about distributed systems, after reading about how [CockroachDB] handles massive amounts of
 > relational data in a flat key-value store called [Pebble]!
+> This is quite the ambitious learning project as well, because at the time of writing this, I'm still 16yo
+> and going to high school. I'll be enrolling in uni in half a year, but I'm enjoying the challenge!
 
 Old SQL-based database systems have...
 - nullability by default (and the `NOT NULL` operator I despise),
