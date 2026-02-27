@@ -17,11 +17,11 @@ Old SQL-based database systems have...
 
 ## Current Progress
 
-Tempest is currently in the **LSM-Storage Layer** phase:
 * **Storage Silos:** Shared-nothing architecture using `io_uring` for high-performance I/O.
+* **LSM-Tree Key-Value Storage:** Completed Manifest and MemTable. Working on the Write-Ahead Log, before SSTs.
 * **Hybrid Logical Clocks (HLC):** Maintaining causality across distributed silos.
-* **Merging Engine:** A high-performance $k$-way merge iterator for read paths.
-* **Zero-Overhead Tracing:** Logging is compiled out in release builds for maximum throughput.
+* **Iterator Layer:** High-performance collection of $k$-way iterators for read paths, combined
+  through the merge iterator implementation to collect from all the sources.
 
 I started out with prototypes that had lots of `lock()`s and `Arc`s all over the place, when I
 wanted to test out `io_uring` and noticed the restriction on `!Send`. That was the moment I had to
