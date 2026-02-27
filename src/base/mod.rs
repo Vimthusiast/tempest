@@ -7,6 +7,8 @@
 //! - [`InternalKey`]: This is the key representation that our storage layer uses. It implements
 //!   custom ordering through the [`Comparer`] trait, allowing for key suffixes that encode custom
 //!   data. Tempest uses the suffix for [`HlcTimestamp`]s, to allow ordering of data across silos.
+//!
+//! [`HlcTimestamp`]: crate::ctrl::hlc::HlcTimestamp
 
 use std::{cmp, marker::PhantomData};
 
@@ -18,11 +20,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod comparer;
 pub mod error;
-pub mod hlc;
 
 pub use comparer::*;
 pub use error::*;
-pub use hlc::*;
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.

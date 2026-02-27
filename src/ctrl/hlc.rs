@@ -1,4 +1,11 @@
-//! This module contains the logic for generating and encoding [`HlcTimestamp`]s.
+//! # Hybrid Logical Clock
+//!
+//! This module contains the logic for generating and encoding [`HlcTimestamp`]s, through the
+//! [`HlcGenerator`] implementation. Clock skew across restarts is a possibility, that the user
+//! has to account for, depending on the users clock implementation for retrieving milliseconds.
+
+// => We could try persisting the timestamp every so often to avoid going back in time, like with
+// the sequence numbers in the [`SiloManifest`] implementation (range allocations).
 
 /// # Hybrid Logical Clock Timestamp
 ///
