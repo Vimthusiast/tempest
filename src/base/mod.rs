@@ -10,6 +10,7 @@
 
 use std::{cmp, marker::PhantomData};
 
+use bincode::Options as BincodeOptions;
 use bytes::Bytes;
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -30,6 +31,19 @@ pub const SST_MAGICNUM: &[u8; 8] = b"TMPS_SST";
 /// Magic number for the silo manifest files, as a first check for file validation.
 /// Stored in the header, at the start of a `MANIFEST-*` file.
 pub const SILO_MANIFEST_MAGICNUM: &[u8; 8] = b"TMPS_MAN";
+
+/// Magic number for the silo write-ahead log files, as a first check for file validation.
+/// Stored in the header, at the start of a `*.log` file.
+pub const SILO_WAL_MAGICNUM: &[u8; 8] = b"TMPS_WAL";
+
+/// The crate wide used [`bincode`] encoding options.
+#[doc(hidden)]
+pub fn bincode_options() -> impl BincodeOptions {
+    bincode::options()
+        .with_fixint_encoding() // Important: no variable length ints
+        .with_little_endian() // Ensure consistency across platforms
+        .allow_trailing_bytes()
+}
 
 #[derive(
     Debug, Display, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,

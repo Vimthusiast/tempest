@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio_uring::buf::BoundedBuf;
 
 use crate::{
-    base::{SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult},
+    base::{SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult, bincode_options},
     fio::{FioFS, FioFile},
 };
 
@@ -24,13 +24,6 @@ fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, file_number: u64) -> Pat
         .as_ref()
         .join(format!("l-{}", level))
         .join(format!("{}.sst", file_number))
-}
-
-fn bincode_options() -> impl BincodeOptions {
-    bincode::options()
-        .with_fixint_encoding() // Important: no variable length ints
-        .with_little_endian() // Ensure consistency across platforms
-        .allow_trailing_bytes()
 }
 
 /// # SST Metadata
@@ -186,24 +179,28 @@ impl SiloManifestRecordPrefix {
 
     /// Calculates the checksum of `data` and compares it with the stored checksum.
     /// The length of `data` must equal the stored `data_len`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data.len()` is different from `self.data_len`.
     #[inline]
-    fn is_valid_data(&self, data: &[u8]) -> bool {
-        assert!(data.len() == self.data_len as usize);
+    fn is_valid_record(&self, data: &[u8]) -> bool {
+        assert_eq!(data.len(), self.data_len as usize);
         let computed_checksum = crc64(0, data);
         self.checksum == computed_checksum
     }
 
     /// Encodes this record prefix into bytes.
+    #[inline]
     fn encode(&self) -> [u8; SILO_MANIFEST_RECORD_PREFIX_SIZE] {
         let mut buf = [0u8; SILO_MANIFEST_RECORD_PREFIX_SIZE];
-
         buf[0..4].copy_from_slice(&self.data_len.to_le_bytes());
         buf[4..12].copy_from_slice(&self.checksum.to_le_bytes());
-
         buf
     }
 
     /// Decodes this record prefix from a byte slice.
+    #[inline]
     fn decode(buf: &[u8; SILO_MANIFEST_RECORD_PREFIX_SIZE]) -> Self {
         let data_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         let checksum = u64::from_le_bytes(buf[4..12].try_into().unwrap());
@@ -653,7 +650,7 @@ impl<F: FioFS> SiloManifest<F> {
         scratch[0..SILO_MANIFEST_RECORD_PREFIX_SIZE].copy_from_slice(&record_prefix.encode());
 
         // the created record prefix for data should validate the data successfully
-        debug_assert!(record_prefix.is_valid_data(&scratch[SILO_MANIFEST_RECORD_PREFIX_SIZE..]));
+        debug_assert!(record_prefix.is_valid_record(&scratch[SILO_MANIFEST_RECORD_PREFIX_SIZE..]));
 
         // write the scratch buffer to disk
         let (res, buf) = file.write_all_at(scratch, filepos).await;
@@ -729,7 +726,7 @@ impl<F: FioFS> SiloManifest<F> {
         current_filepos += prefix.data_len as u64;
 
         // validate with checksum
-        let is_valid = prefix.is_valid_data(slice.as_ref());
+        let is_valid = prefix.is_valid_record(slice.as_ref());
         if !is_valid {
             return (
                 Err(io::Error::new(
@@ -908,6 +905,21 @@ impl<F: FioFS> SiloManifest<F> {
         }
     }
 
+    pub(super) async fn get_filenums(&mut self, n: u64) -> TempestResult<std::ops::Range<u64>> {
+        let (range, new_limit) = self.calculate_filenum_range(n)?;
+        if new_limit.is_some() {
+            // Slow path: we have to write a new limit to disk
+            let resp = self
+                .handle_request(ManifestRequest::new().with_filenums_needed(n))
+                .await?;
+            Ok(resp.filenum_range)
+        } else {
+            // Fast path: just bump the current pointer
+            self.filenum_current = range.end;
+            Ok(range)
+        }
+    }
+
     /// Returns the next sequence number that will be used.
     pub(super) const fn seqnum_current(&self) -> SeqNum {
         self.seqnum_current
@@ -939,7 +951,7 @@ mod tests {
         let encoded = record.encode();
         assert_eq!(encoded.len(), SILO_MANIFEST_RECORD_PREFIX_SIZE);
         let decoded = SiloManifestRecordPrefix::decode(&encoded);
-        assert!(decoded.is_valid_data(data));
+        assert!(decoded.is_valid_record(data));
     }
 
     #[test]

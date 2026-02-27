@@ -71,10 +71,14 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         let root_dir = root_dir.into();
 
         // initialize manifest
-        let manifest = SiloManifest::init(fs.clone(), root_dir.clone()).await?;
+        let mut manifest = SiloManifest::init(fs.clone(), root_dir.clone()).await?;
+
+        // allocate filenums for other components
+        let filenum_range = manifest.get_filenums(1).await?;
+        let mut filenums = filenum_range.into_iter();
 
         // initialize wal
-        let wal = SiloWal::new(fs, root_dir.clone());
+        let wal = SiloWal::init(fs, root_dir.clone(), filenums.next().unwrap()).await?;
 
         // initialize memtables
         let active = MemTable::new();
@@ -108,6 +112,12 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         trace!(seqnum = seqnum.get(), "batch stamped with seqnum");
 
         let mut body = batch.take_buf().freeze();
+
+        // -- persist in wal --
+        trace!("persisting batch in wal");
+        self.wal.append(body.clone()).await?;
+
+        // -- commit to memtable --
         let header = body.split_to(12);
 
         let seqnum_raw = u64::from_le_bytes(header[0..8].try_into().unwrap());
