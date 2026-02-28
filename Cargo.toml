@@ -26,3 +26,4 @@ tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
 zerocopy = { version = "0.8.39", features = ["derive", "std"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 num_cpus = "1.17.0"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }

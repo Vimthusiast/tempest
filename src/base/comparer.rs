@@ -13,6 +13,12 @@ pub trait Comparer: Default + Clone + 'static {
     /// Compares the suffix part of two keys.
     fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
 
+    /// Splits the key and returns the prefix and suffix part.
+    fn split_up<'a>(&self, key: &'a [u8]) -> (&'a [u8], &'a [u8]) {
+        let knon = self.split(key);
+        key.split_at(knon)
+    }
+
     /// Compares the logical part (user facing) of a key.
     /// Usually, this just compares the key prefix, but you may choose yourself.
     fn compare_logical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
