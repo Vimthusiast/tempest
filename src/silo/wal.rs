@@ -11,7 +11,7 @@ use tokio_uring::buf::BoundedBuf;
 use tracing::{Instrument, Level};
 
 use crate::{
-    base::{SILO_WAL_MAGICNUM, TempestError, TempestResult},
+    base::{HexU64, SILO_WAL_MAGICNUM, TempestError, TempestResult},
     fio::{FioFS, FioFile},
 };
 
@@ -184,7 +184,7 @@ impl<F: FioFile> WalFileReader<F> {
         let record_prefix = WalRecordPrefix::decode(scratch[..].try_into().unwrap());
         debug!(
             len = record_prefix.len,
-            checksum = record_prefix.checksum,
+            checksum = ?HexU64(record_prefix.checksum),
             "got record prefix"
         );
         current_pos += SILO_WAL_RECORD_PREFIX_SIZE as u64;

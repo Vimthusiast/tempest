@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio_uring::buf::BoundedBuf;
 
 use crate::{
-    base::{SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult, bincode_options},
+    base::{HexU64, SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult, bincode_options},
     fio::{FioFS, FioFile},
 };
 
@@ -709,7 +709,7 @@ impl<F: FioFS> SiloManifest<F> {
         let prefix = SiloManifestRecordPrefix::decode(slice.as_ref().try_into().unwrap());
         trace!(
             data_len = prefix.data_len,
-            checksum = prefix.checksum,
+            checksum = ?HexU64(prefix.checksum),
             "read and decoded manifest record prefix"
         );
 
