@@ -35,6 +35,7 @@ pub mod batch;
 pub mod iterator;
 pub mod manifest;
 pub mod memtable;
+pub mod sst;
 pub mod wal;
 
 #[derive(Debug)]
