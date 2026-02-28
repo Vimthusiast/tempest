@@ -3,7 +3,10 @@ use std::marker::PhantomData;
 use bytes::{BufMut, Bytes, BytesMut};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, Ref, U32};
 
-use crate::base::{Comparer, InternalKey, KeyTrailer};
+use crate::{
+    base::{Comparer, InternalKey, KeyTrailer},
+    silo::iterator::SyncIterator,
+};
 
 pub const BLOCK_TARGET_SIZE: usize = 4096;
 pub const BLOCK_RESTART_INTERVAL: u32 = 16;
@@ -111,6 +114,84 @@ impl BlockBuilder {
     }
 }
 
+fn parse_block(buf: &[u8]) -> (&[u8], &[U32<LittleEndian>]) {
+    let footer_start = buf.len() - size_of::<BlockFooter>();
+    let count = BlockFooter::read_from_bytes(&buf[footer_start..])
+        .unwrap()
+        .restart_count
+        .get() as usize;
+    let offsets_start = footer_start - count * size_of::<U32<LittleEndian>>();
+    let entries = &buf[..offsets_start];
+    let offsets = <[U32<LittleEndian>]>::ref_from_bytes(&buf[offsets_start..footer_start]).unwrap();
+    (entries, offsets)
+}
+
+fn parse_offsets(buf: &[u8], entries_end: usize) -> &[U32<LittleEndian>] {
+    let footer_start = buf.len() - size_of::<BlockFooter>();
+    <[U32<LittleEndian>]>::ref_from_bytes(&buf[entries_end..footer_start]).unwrap()
+}
+
+pub struct BlockIterator<C: Comparer> {
+    buf: Bytes,
+    pos: usize,
+    restart_count: usize,
+    entries_end: usize,
+    last_key: Vec<u8>,
+    _marker: PhantomData<C>,
+}
+
+impl<C: Comparer> BlockIterator<C> {
+    pub fn new(buf: Bytes) -> Self {
+        let (entries, offsets) = parse_block(&buf);
+        let restart_count = offsets.len();
+        let entries_end = entries.len();
+        Self {
+            buf,
+            pos: 0,
+            restart_count,
+            entries_end,
+            last_key: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<C: Comparer> Iterator for BlockIterator<C> {
+    type Item = (InternalKey<C>, Bytes);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.entries_end {
+            return None;
+        }
+
+        let entries = &self.buf[..self.entries_end];
+
+        let (header, _) = Ref::<_, BlockEntryHeader>::from_prefix(&entries[self.pos..]).unwrap();
+        let shared = header.shared_key_len.get() as usize;
+        let unshared = header.unshared_key_len.get() as usize;
+        let value_len = header.value_len.get() as usize;
+        self.pos += size_of::<BlockEntryHeader>();
+
+        // prefix decompress the user key
+        self.last_key.truncate(shared);
+        self.last_key
+            .extend_from_slice(&entries[self.pos..self.pos + unshared]);
+        self.pos += unshared;
+
+        // read trailer
+        let (trailer, _) = Ref::<_, KeyTrailer>::from_prefix(&entries[self.pos..]).unwrap();
+        let trailer = *trailer;
+        self.pos += size_of::<KeyTrailer>();
+
+        // zero-copy slice into the buffer for the value
+        let value = self.buf.slice(self.pos..self.pos + value_len);
+        self.pos += value_len;
+
+        let key = InternalKey::new(Bytes::copy_from_slice(&self.last_key), trailer);
+        Some((key, value))
+    }
+}
+
 pub struct BlockReader<C: Comparer> {
     buf: Bytes,
     _marker: PhantomData<C>,
@@ -128,14 +209,10 @@ impl<C: Comparer> BlockReader<C> {
         // convert this generic key to a borrowed key so we can compare it with ours
         let key = InternalKey::<C, &[u8]>::new(key.key().as_ref(), key.trailer());
 
-        // phase 1: split up the buffer into footer, offset index, and entries
-        let (rest, footer) = Ref::<_, BlockFooter>::from_suffix(self.buf.as_ref())
-            .expect("buf should at least fit the footer");
-        let count = footer.restart_count.get() as usize;
-        let (entries, offsets) =
-            Ref::<_, [U32<LittleEndian>]>::from_suffix_with_elems(rest, count).unwrap();
+        // parse the block into sections
+        let (entries, offsets) = parse_block(&self.buf);
 
-        // phase 2: binary search for the right restart interval
+        // phase 1: binary search for the right restart interval
         let restart_key = |offset: usize| -> InternalKey<C, &[u8]> {
             let (header, rest) =
                 Ref::<_, BlockEntryHeader>::from_prefix(&entries[offset..]).unwrap();
@@ -163,7 +240,7 @@ impl<C: Comparer> BlockReader<C> {
             .map(|o| o.get() as usize)
             .unwrap_or(entries.len());
 
-        // phase 3: linearly search through this interval
+        // phase 2: linearly search through this interval
         let mut pos = start_offset;
         let mut last_key: Vec<u8> = Vec::new();
 
@@ -195,23 +272,27 @@ impl<C: Comparer> BlockReader<C> {
 
         None
     }
+
+    pub fn iter(&self) -> SyncIterator<C, BlockIterator<C>> {
+        SyncIterator::new(BlockIterator::new(self.buf.clone()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use crate::base::{DefaultComparer, KeyKind, KeyTrailer, SeqNum, InternalKey};
     use super::*;
+    use crate::base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
+    use bytes::Bytes;
 
     fn make_trailer(seqnum: u64, kind: KeyKind) -> KeyTrailer {
-        KeyTrailer::new(
-            unsafe { SeqNum::new_unchecked(seqnum) },
-            kind,
-        )
+        KeyTrailer::new(unsafe { SeqNum::new_unchecked(seqnum) }, kind)
     }
 
     fn make_key(s: &str, seqnum: u64) -> InternalKey<DefaultComparer> {
-        InternalKey::new(Bytes::copy_from_slice(s.as_bytes()), make_trailer(seqnum, KeyKind::Put))
+        InternalKey::new(
+            Bytes::copy_from_slice(s.as_bytes()),
+            make_trailer(seqnum, KeyKind::Put),
+        )
     }
 
     fn build_block(entries: &[(&str, u64, &str)]) -> Bytes {
@@ -239,30 +320,21 @@ mod tests {
 
     #[test]
     fn test_get_missing_key() {
-        let buf = build_block(&[
-            ("apple", 1, "fruit"),
-            ("cherry", 1, "red"),
-        ]);
+        let buf = build_block(&[("apple", 1, "fruit"), ("cherry", 1, "red")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
         assert!(reader.get(make_key("banana", 1)).is_none());
     }
 
     #[test]
     fn test_get_key_before_first() {
-        let buf = build_block(&[
-            ("banana", 1, "yellow"),
-            ("cherry", 1, "red"),
-        ]);
+        let buf = build_block(&[("banana", 1, "yellow"), ("cherry", 1, "red")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
         assert!(reader.get(make_key("apple", 1)).is_none());
     }
 
     #[test]
     fn test_get_key_after_last() {
-        let buf = build_block(&[
-            ("apple", 1, "fruit"),
-            ("banana", 1, "yellow"),
-        ]);
+        let buf = build_block(&[("apple", 1, "fruit"), ("banana", 1, "yellow")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
         assert!(reader.get(make_key("cherry", 1)).is_none());
     }
@@ -319,7 +391,10 @@ mod tests {
             ("zzz", 1, "last"),
         ]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
-        assert_eq!(reader.get(make_key("aaa", 1)).unwrap(), Bytes::from("first"));
+        assert_eq!(
+            reader.get(make_key("aaa", 1)).unwrap(),
+            Bytes::from("first")
+        );
         assert_eq!(reader.get(make_key("zzz", 1)).unwrap(), Bytes::from("last"));
     }
 
@@ -328,5 +403,116 @@ mod tests {
         let buf = build_block(&[("key", 1, "")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
         assert_eq!(reader.get(make_key("key", 1)).unwrap(), Bytes::new());
+    }
+
+    #[test]
+    fn test_iterator_all_entries() {
+        let buf = build_block(&[
+            ("apple", 1, "fruit"),
+            ("banana", 1, "yellow"),
+            ("cherry", 1, "red"),
+        ]);
+        let iter = BlockIterator::<DefaultComparer>::new(buf);
+        let results: Vec<_> = iter.map(|(k, v)| (k.key().clone(), v)).collect();
+
+        assert_eq!(results[0], (Bytes::from("apple"), Bytes::from("fruit")));
+        assert_eq!(results[1], (Bytes::from("banana"), Bytes::from("yellow")));
+        assert_eq!(results[2], (Bytes::from("cherry"), Bytes::from("red")));
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_iterator_prefix_compression() {
+        // all keys share a long common prefix to stress prefix decompression
+        let buf = build_block(&[
+            ("tempest:key:0001", 1, "a"),
+            ("tempest:key:0002", 1, "b"),
+            ("tempest:key:0003", 1, "c"),
+        ]);
+        let iter = BlockIterator::<DefaultComparer>::new(buf);
+        let keys: Vec<_> = iter.map(|(k, _)| k.key().clone()).collect();
+
+        assert_eq!(keys[0], Bytes::from("tempest:key:0001"));
+        assert_eq!(keys[1], Bytes::from("tempest:key:0002"));
+        assert_eq!(keys[2], Bytes::from("tempest:key:0003"));
+    }
+
+    #[test]
+    fn test_iterator_across_restart_boundary() {
+        let mut entries: Vec<(String, u64, String)> = Vec::new();
+        for i in 0..40u32 {
+            entries.push((format!("prefix:key:{:04}", i), 1, format!("val:{}", i)));
+        }
+        let entries_ref: Vec<(&str, u64, &str)> = entries
+            .iter()
+            .map(|(k, s, v)| (k.as_str(), *s, v.as_str()))
+            .collect();
+
+        let buf = build_block(&entries_ref);
+        let results: Vec<_> = BlockIterator::<DefaultComparer>::new(buf)
+            .map(|(k, v)| (k.key().clone(), v))
+            .collect();
+
+        assert_eq!(results.len(), 40);
+        for i in 0..40usize {
+            assert_eq!(
+                results[i].0,
+                Bytes::copy_from_slice(format!("prefix:key:{:04}", i).as_bytes())
+            );
+            assert_eq!(
+                results[i].1,
+                Bytes::copy_from_slice(format!("val:{}", i).as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn test_iterator_trailers_preserved() {
+        let mut builder = BlockBuilder::new();
+        let k = Bytes::from("key");
+        let v = Bytes::from("val");
+        let trailer = make_trailer(42, KeyKind::Put);
+        builder.write_entry(&k, trailer, &v);
+        let buf = builder.finalize().freeze();
+
+        let mut iter = BlockIterator::<DefaultComparer>::new(buf);
+        let (key, _) = iter.next().unwrap();
+        assert_eq!(key.trailer().seqnum().get(), 42);
+        assert_eq!(key.trailer().kind(), KeyKind::Put);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn test_iterator_empty_values() {
+        let buf = build_block(&[("a", 1, ""), ("b", 1, ""), ("c", 1, "")]);
+        let results: Vec<_> = BlockIterator::<DefaultComparer>::new(buf)
+            .map(|(k, v)| (k.key().clone(), v))
+            .collect();
+
+        assert_eq!(results.len(), 3);
+        for (_, v) in &results {
+            assert_eq!(*v, Bytes::new());
+        }
+    }
+
+    #[test]
+    fn test_iterator_matches_get() {
+        // every entry found by the iterator should also be found by get()
+        let mut entries: Vec<(String, u64, String)> = Vec::new();
+        for i in 0..20u32 {
+            entries.push((format!("key:{:04}", i), 1, format!("val:{}", i)));
+        }
+        let entries_ref: Vec<(&str, u64, &str)> = entries
+            .iter()
+            .map(|(k, s, v)| (k.as_str(), *s, v.as_str()))
+            .collect();
+
+        let buf = build_block(&entries_ref);
+        let reader = BlockReader::<DefaultComparer>::new(buf.clone());
+
+        for (key, value) in BlockIterator::<DefaultComparer>::new(buf) {
+            let found = reader.get(key);
+            assert_eq!(found.unwrap(), value);
+        }
     }
 }

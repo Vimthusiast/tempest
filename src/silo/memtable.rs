@@ -4,7 +4,7 @@ use bytes::Bytes;
 
 use crate::{
     base::{Comparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
-    silo::iterator::MemTableIterator,
+    silo::iterator::{SyncIterator, TempestIterator},
 };
 
 #[derive(Debug, Default)]
@@ -47,7 +47,7 @@ impl<C: Comparer> MemTable<C> {
         None
     }
 
-    pub(super) fn iter(&self) -> MemTableIterator<'_, C> {
-        MemTableIterator::new(self.map.iter().peekable())
+    pub(super) fn iter(&self) -> impl TempestIterator<'_, C> {
+        SyncIterator::new(self.map.iter().map(|(k, v)| (k.clone(), v.clone())))
     }
 }
