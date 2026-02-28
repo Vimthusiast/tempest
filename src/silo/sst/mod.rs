@@ -1,7 +1,7 @@
-mod block;
-mod bloom;
-mod footer;
-mod index;
+pub mod block;
+pub mod bloom;
+pub mod footer;
+pub mod index;
 
-mod reader;
-mod writer;
+pub mod reader;
+pub mod writer;
