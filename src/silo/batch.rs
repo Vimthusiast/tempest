@@ -1,7 +1,7 @@
 use bytes::{BufMut, BytesMut};
 use integer_encoding::VarInt;
 
-use crate::base::{KeyKind, SeqNum};
+use crate::base::{KeyKind, PrettyBytes, SeqNum};
 
 /// # Write Batch
 ///
@@ -93,7 +93,10 @@ impl WriteBatch {
 
     /// Add a `put KEY=VALUE` command to this batch.
     pub fn put(&mut self, key: &[u8], value: &[u8]) {
-        trace!("write batch: put '{:?}'='{:?}'", key, value);
+        trace!(
+            key = ?PrettyBytes(key), value = ?PrettyBytes(value),
+            "write batch: put",
+        );
         self.count += 1;
         self.buf.put_u8(KeyKind::Put.into());
         self.put_varint(key.len());
@@ -104,7 +107,10 @@ impl WriteBatch {
 
     /// Add a `delete KEY` command to this batch.
     pub fn delete(&mut self, key: &[u8]) {
-        trace!("write batch: delete '{:?}'", key);
+        trace!(
+            key = ?PrettyBytes(key),
+            "write batch: delete",
+        );
         self.count += 1;
         self.buf.put_u8(KeyKind::Delete.into());
         self.put_varint(key.len());

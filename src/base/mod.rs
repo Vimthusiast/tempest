@@ -20,9 +20,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod comparer;
 pub mod error;
+pub mod utils;
 
 pub use comparer::*;
 pub use error::*;
+pub use utils::*;
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.
