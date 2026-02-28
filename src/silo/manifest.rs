@@ -572,7 +572,7 @@ impl<F: FioFS> SiloManifest<F> {
             .open(&filepath)
             .await?;
 
-        let scratch = self.scratch.take().expect("scatch buffer not taken yet");
+        let scratch = self.scratch.take().expect("scatch buffer exists");
 
         let initial_edit = ManifestEdit::V1(ManifestEditV1 {
             seqnum_limit: Some(self.seqnum_limit),
@@ -671,7 +671,7 @@ impl<F: FioFS> SiloManifest<F> {
     }
 
     async fn append_framed_edit(&mut self, edit: &ManifestEdit) -> TempestResult<()> {
-        let mut scratch = self.scratch.take().expect("scatch buffer not taken yet");
+        let mut scratch = self.scratch.take().expect("scatch buffer exists");
         scratch.clear();
 
         let (res, scratch) =

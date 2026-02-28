@@ -142,7 +142,9 @@ impl<F: FioFile> WalFileReader<F> {
         if self.filepos >= self.endpos || self.had_error {
             return None;
         }
-        let scratch = self.scratch.take().expect("scratch buffer not taken yet");
+        // NB: We take here and expect it to always be put back, since we require ownership when
+        // passing this buffer to the file system layer, i.e. io_uring
+        let scratch = self.scratch.take().expect("scratch buffer exists");
         let (res, scratch) =
             Self::read_record(scratch, &self.file, self.filepos, self.endpos).await;
         self.scratch = Some(scratch);
@@ -442,7 +444,7 @@ impl<F: FioFS> SiloWal<F> {
 
         // encode record prefix into scratch buffer and write it out to the file
         debug!("writing record prefix");
-        let mut scratch = self.scratch.take().expect("scratch buffer not taken yet");
+        let mut scratch = self.scratch.take().expect("scratch buffer exists");
         scratch.clear();
         let prefix = WalRecordPrefix::new(&data);
         scratch.put_slice(&prefix.encode());
