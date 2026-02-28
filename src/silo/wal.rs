@@ -114,6 +114,10 @@ pub enum WalStatus {
     NeedsRotation,
 }
 
+/// A loose value guard that ensures the WAL is flushed before proceeding with the inner data.
+#[must_use = "WAL data must be flushed to disk"]
+pub struct WalFlushRequired(pub WalStatus);
+
 #[derive(Debug)]
 pub struct WalFileReader<F: FioFile> {
     file: F,
@@ -429,7 +433,7 @@ impl<F: FioFS> SiloWal<F> {
     /// Note that, while we do write to the file, we don't `fsync` in any way, so the caller is
     /// responsible. Returns the current status of this WAL.
     #[instrument(skip_all, level = "debug")]
-    pub(crate) async fn append(&mut self, data: Bytes) -> TempestResult<WalStatus> {
+    pub(crate) async fn append(&mut self, data: Bytes) -> TempestResult<WalFlushRequired> {
         let mut filepos = self.filepos;
         debug!(
             data_size=?ByteSize(data.len() as u64), filepos=?HexU64(filepos),
@@ -479,7 +483,13 @@ impl<F: FioFS> SiloWal<F> {
         );
 
         // return the new status
-        Ok(self.get_status())
+        Ok(WalFlushRequired(self.get_status()))
+    }
+
+    /// Executes a flush of the WAL and returns the inner status from that flush.
+    pub async fn flush(&mut self, flush: WalFlushRequired) -> TempestResult<WalStatus> {
+        self.current_file.sync_all().await?;
+        Ok(flush.0)
     }
 }
 
@@ -503,7 +513,7 @@ mod tests {
         {
             let (mut wal, mut recovery_reader) =
                 SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum()).await?;
-            wal.append(data.clone()).await?;
+            let _ = wal.append(data.clone()).await?;
             assert!(recovery_reader.next().await.is_none());
         }
 
