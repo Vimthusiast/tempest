@@ -11,7 +11,7 @@ use tokio_uring::buf::BoundedBuf;
 use tracing::{Instrument, Level};
 
 use crate::{
-    base::{HexU64, SILO_WAL_MAGICNUM, TempestError, TempestResult},
+    base::{ByteSize, HexU64, SILO_WAL_MAGICNUM, TempestError, TempestResult},
     fio::{FioFS, FioFile},
 };
 
@@ -183,7 +183,7 @@ impl<F: FioFile> WalFileReader<F> {
         }
         let record_prefix = WalRecordPrefix::decode(scratch[..].try_into().unwrap());
         debug!(
-            len = record_prefix.len,
+            size = ?ByteSize(record_prefix.len as u64),
             checksum = ?HexU64(record_prefix.checksum),
             "got record prefix"
         );
@@ -291,8 +291,8 @@ impl<F: FioFS> WalRecoveryReader<F> {
                 let filepos = SILO_WAL_HEADER_SIZE as u64;
                 let size = file.size().await?;
                 debug!(
-                    filenum = header.filenum,
-                    size, "sourcing wal file through reader"
+                    filenum = header.filenum, size = ?ByteSize(size),
+                    "sourcing wal file through reader"
                 );
                 let reader = WalFileReader::new(file, filepos, size);
                 sources.push(reader)
@@ -432,7 +432,7 @@ impl<F: FioFS> SiloWal<F> {
     pub(crate) async fn append(&mut self, data: Bytes) -> TempestResult<WalStatus> {
         let mut filepos = self.filepos;
         debug!(
-            data_len = data.len(), filepos=?HexU64(filepos),
+            data_size=?ByteSize(data.len() as u64), filepos=?HexU64(filepos),
             "appending to write-ahead log"
         );
 
@@ -474,8 +474,8 @@ impl<F: FioFS> SiloWal<F> {
         self.record_count += 1;
 
         debug!(
-            filepos=?HexU64(filepos), record_count = self.record_count, record_size,
-            "finished appending to wal"
+            filepos = ?HexU64(filepos), record_count = self.record_count,
+            record_size = ?ByteSize(record_size), "finished appending to wal"
         );
 
         // return the new status

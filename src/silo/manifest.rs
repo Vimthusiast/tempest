@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use tokio_uring::buf::BoundedBuf;
 
 use crate::{
-    base::{HexU64, SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult, bincode_options},
+    base::{
+        ByteSize, HexU64, SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult,
+        bincode_options,
+    },
     fio::{FioFS, FioFile},
 };
 
@@ -282,7 +285,7 @@ pub(super) struct SiloManifest<F: FioFS> {
     /// File handle to the current manifest file.
     current_file: <F as FioFS>::File,
     /// Write offset in the current manifest file.
-    current_filepos: u64,
+    filepos: u64,
     /// The initial file size of the current manifest file.
     initial_file_size: u64,
 
@@ -370,8 +373,8 @@ impl<F: FioFS> SiloManifest<F> {
             manifest_details.sort_by_key(|(filenum, _, _)| *filenum);
 
             if let Some((highest_filenum, path, file)) = manifest_details.pop() {
-                let file_size = file.size().await?;
-                let mut current_filepos = SILO_MANIFEST_HEADER_SIZE as u64;
+                let size = file.size().await?;
+                let mut filepos = SILO_MANIFEST_HEADER_SIZE as u64;
                 let mut scratch = BytesMut::with_capacity(4096);
 
                 let mut had_error = false;
@@ -382,30 +385,25 @@ impl<F: FioFS> SiloManifest<F> {
                 let mut ssts: Vec<SstMetadata> = Vec::new();
 
                 debug!(
-                    highest_filenum,
-                    file_size,
-                    ?path,
+                    highest_filenum, size=?ByteSize(size), ?path,
                     "found latest manifest file, starting read"
                 );
-                while current_filepos < file_size {
+                while filepos < size {
                     let res;
-                    (res, scratch) = Self::read_framed_edit(scratch, &file, current_filepos).await;
+                    (res, scratch) = Self::read_framed_edit(scratch, &file, filepos).await;
                     let (edit, bytes_read) = match res {
                         Ok(v) => v,
                         Err(e) => {
                             warn!(
-                                ?path,
-                                ?current_filepos,
-                                ?file_size,
-                                "could not read manifest edit: {}, reconstructing from remaining data",
-                                e
+                                ?path, filepos=?HexU64(filepos), size=?ByteSize(size),
+                                "could not read manifest edit: {}, reconstructing from remaining data", e
                             );
                             had_error = true;
                             break;
                         }
                     };
                     trace!("got edit from manifest: {:?}", edit);
-                    current_filepos += bytes_read;
+                    filepos += bytes_read;
                     let edit = edit.into_latest();
 
                     if let Some(sl) = edit.seqnum_limit {
@@ -441,8 +439,8 @@ impl<F: FioFS> SiloManifest<F> {
                     scratch: Some(scratch),
 
                     current_file: file,
-                    current_filepos,
-                    initial_file_size: current_filepos,
+                    filepos,
+                    initial_file_size: filepos,
 
                     seqnum_current: seqnum_limit,
                     seqnum_limit,
@@ -510,7 +508,7 @@ impl<F: FioFS> SiloManifest<F> {
             scratch: Some(scratch),
 
             current_file: file,
-            current_filepos: filepos as u64,
+            filepos: filepos as u64,
             initial_file_size,
 
             seqnum_limit: SeqNum::START,
@@ -589,7 +587,7 @@ impl<F: FioFS> SiloManifest<F> {
         self.scratch = Some(scratch);
 
         let bytes_written = res?;
-        self.current_filepos = bytes_written;
+        self.filepos = bytes_written;
         self.initial_file_size = bytes_written;
 
         file.sync_all().await?;
@@ -677,12 +675,12 @@ impl<F: FioFS> SiloManifest<F> {
         scratch.clear();
 
         let (res, scratch) =
-            Self::write_framed_edit(edit, scratch, &self.current_file, self.current_filepos).await;
+            Self::write_framed_edit(edit, scratch, &self.current_file, self.filepos).await;
 
         self.scratch = Some(scratch);
 
         let bytes_written = res?;
-        self.current_filepos += bytes_written;
+        self.filepos += bytes_written;
 
         Ok(())
     }
@@ -830,11 +828,8 @@ impl<F: FioFS> SiloManifest<F> {
             SILO_MANIFEST_GROWTH_BASELINE,
         );
 
-        if self.current_filepos > threshold {
-            trace!(
-                current = self.current_filepos,
-                threshold, "rotating manifest file"
-            );
+        if self.filepos > threshold {
+            trace!(current = self.filepos, threshold, "rotating manifest file");
             self.write_to_new_file().await?;
         }
 
