@@ -163,7 +163,7 @@ impl<F: FioFile> WalFileReader<F> {
         filepos: u64,
         endpos: u64,
     ) -> (TempestResult<(BytesMut, u64)>, BytesMut) {
-        debug!(filepos, "reading from write-ahead log");
+        debug!(filepos=?HexU64(filepos), "reading from write-ahead log");
 
         let mut current_pos = filepos;
 
@@ -355,8 +355,8 @@ pub struct SiloWal<F: FioFS> {
 
     fs: F,
     current_file: <F as FioFS>::File,
-    current_filepos: u64,
-    current_record_count: u32,
+    filepos: u64,
+    record_count: u32,
 }
 
 // -- constants --
@@ -407,8 +407,8 @@ impl<F: FioFS> SiloWal<F> {
 
             fs,
             current_file,
-            current_filepos: SILO_WAL_HEADER_SIZE as u64,
-            current_record_count: 0,
+            filepos: SILO_WAL_HEADER_SIZE as u64,
+            record_count: 0,
         };
 
         info!("finished initializing write-ahead log");
@@ -416,8 +416,8 @@ impl<F: FioFS> SiloWal<F> {
     }
 
     const fn get_status(&self) -> WalStatus {
-        let needs_rotation = self.current_filepos > SILO_WAL_FILE_ROTATE_FILE_SIZE_THRESHOLD
-            || self.current_record_count > SILO_WAL_FILE_ROTATE_RECORD_COUNT_THRESHOLD;
+        let needs_rotation = self.filepos > SILO_WAL_FILE_ROTATE_FILE_SIZE_THRESHOLD
+            || self.record_count > SILO_WAL_FILE_ROTATE_RECORD_COUNT_THRESHOLD;
         if needs_rotation {
             WalStatus::NeedsRotation
         } else {
@@ -430,10 +430,10 @@ impl<F: FioFS> SiloWal<F> {
     /// responsible. Returns the current status of this WAL.
     #[instrument(skip_all, level = "debug")]
     pub(crate) async fn append(&mut self, data: Bytes) -> TempestResult<WalStatus> {
-        let mut current_pos = self.current_filepos;
+        let mut filepos = self.filepos;
         debug!(
-            data_len = data.len(),
-            current_pos, "appending to write-ahead log"
+            data_len = data.len(), filepos=?HexU64(filepos),
+            "appending to write-ahead log"
         );
 
         // encode record prefix into scratch buffer and write it out to the file
@@ -445,14 +445,14 @@ impl<F: FioFS> SiloWal<F> {
         let sliced_scratch = scratch.slice(..SILO_WAL_RECORD_PREFIX_SIZE);
         let (res, sliced_scratch) = self
             .current_file
-            .write_all_at(sliced_scratch, current_pos)
+            .write_all_at(sliced_scratch, filepos)
             .await;
         self.scratch = Some(sliced_scratch.into_inner());
         if let Err(e) = res {
             return Err(e.into());
         }
         // move past the written record prefix
-        current_pos += SILO_WAL_RECORD_PREFIX_SIZE as u64;
+        filepos += SILO_WAL_RECORD_PREFIX_SIZE as u64;
 
         // NB: slice up data explicitly for io_uring passing. uring interface does not respect
         // length of the buffer, but capacity otherwise.
@@ -460,23 +460,21 @@ impl<F: FioFS> SiloWal<F> {
         debug!("writing record body");
         let data_len = data.len();
         let data_slice = BoundedBuf::slice(data, ..data_len);
-        let (res, _data_slice) = self
-            .current_file
-            .write_all_at(data_slice, current_pos)
-            .await;
+        let (res, _data_slice) = self.current_file.write_all_at(data_slice, filepos).await;
         if let Err(e) = res {
             return Err(e.into());
         }
         // move past the written record body
-        current_pos += data_len as u64;
+        filepos += data_len as u64;
+
+        let record_size = filepos - self.filepos;
 
         // update the file position
-        self.current_filepos = current_pos;
-        self.current_record_count += 1;
+        self.filepos = filepos;
+        self.record_count += 1;
 
         debug!(
-            current_pos,
-            current_record_count = self.current_record_count,
+            filepos=?HexU64(filepos), record_count = self.record_count, record_size,
             "finished appending to wal"
         );
 

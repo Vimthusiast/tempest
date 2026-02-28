@@ -127,7 +127,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         trace!("writing batch: {:?}", batch);
         let seqnum = self.get_seqnum().await?;
         batch.commit(seqnum);
-        trace!(seqnum = seqnum.get(), "batch stamped with seqnum");
+        trace!(?seqnum, "batch stamped with seqnum");
 
         let body = batch.take_buf().freeze();
 

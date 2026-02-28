@@ -21,7 +21,7 @@ impl<C: Comparer> MemTable<C> {
     pub(super) fn insert(&mut self, key: InternalKey<C>, value: Bytes) {
         trace!(
             key_kind = ?key.trailer().kind(), key_len = key.key().len(),
-            key=?key.key(), ?value, seqnum=key.trailer().seqnum().get(),
+            key=?key.key(), ?value, seqnum=?key.trailer().seqnum(),
             "inserting kv pair into memtable",
         );
         self.map.insert(key, value);

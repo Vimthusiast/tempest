@@ -41,8 +41,8 @@ use crate::base::{KeyKind, PrettyBytes, SeqNum};
 // merging operations
 /// ```
 #[derive(Debug)]
+#[debug("WriteBatch(len={}, count={})", buf.len(), count)]
 pub struct WriteBatch {
-    #[debug("BytesMut(len={},cap={})", buf.len(), buf.capacity())]
     buf: BytesMut,
     count: u32,
     committed: bool,
@@ -137,7 +137,7 @@ impl WriteBatch {
     pub(crate) fn take_buf(self) -> BytesMut {
         assert!(
             self.committed,
-            "trying to access a write batch, that was not assigned a seqnum."
+            "trying to access a write batch, that was not assigned a seqnum"
         );
         self.buf
     }

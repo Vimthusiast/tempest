@@ -62,6 +62,12 @@ pub(super) struct SstDeletion {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[debug("ManifestEditV1(seqnum_limit={} filenum_limit={} ssts_added={} ssts_removed={})",
+    seqnum_limit.map(|v| v.get()).unwrap_or(0),
+    filenum_limit.unwrap_or(0),
+    ssts_added.as_ref().map(|v| v.len()).unwrap_or(0),
+    ssts_removed.as_ref().map(|v| v.len()).unwrap_or(0),
+)]
 pub struct ManifestEditV1 {
     seqnum_limit: Option<SeqNum>,
     filenum_limit: Option<u64>,
@@ -78,6 +84,7 @@ pub struct ManifestEditV1 {
 #[repr(u16)]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ManifestEdit {
+    #[debug("{:?}", _0)]
     V1(ManifestEditV1) = 1,
 }
 
@@ -342,7 +349,9 @@ impl<F: FioFS> SiloManifest<F> {
                         }
 
                         // decode header
-                        let header = match SiloManifestHeader::decode(buf[..SILO_MANIFEST_HEADER_SIZE].try_into().unwrap()) {
+                        let header = match SiloManifestHeader::decode(
+                            buf[..SILO_MANIFEST_HEADER_SIZE].try_into().unwrap(),
+                        ) {
                             Ok(h) => h,
                             Err(e) => {
                                 warn!("could not decode header for file {:?}", path);
