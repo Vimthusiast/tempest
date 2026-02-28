@@ -1,7 +1,7 @@
 mod block;
 mod bloom;
-mod index;
 mod footer;
+mod index;
 
 mod reader;
 mod writer;

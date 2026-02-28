@@ -25,6 +25,7 @@ pub mod utils;
 pub use comparer::*;
 pub use error::*;
 pub use utils::*;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U64};
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.
@@ -47,10 +48,8 @@ pub fn bincode_options() -> impl BincodeOptions {
         .allow_trailing_bytes()
 }
 
-#[derive(
-    Debug, Display, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[debug("SeqNum({_0})")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[debug("SeqNum({_0:?})")]
 pub struct SeqNum(NonMaxU64);
 
 impl SeqNum {
@@ -131,24 +130,38 @@ impl KeyKind {
     pub const MAX: Self = Self::Put;
 }
 
-#[derive(Debug, Display, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[debug("KeyTrailer({}:seqnum={},kind={})", _0, self.seqnum(), self.kind())]
-pub struct KeyTrailer(u64);
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    IntoBytes,
+    FromBytes,
+    KnownLayout,
+    Immutable,
+)]
+#[repr(transparent)]
+#[debug("KeyTrailer({}: seqnum={:?}, kind={})", _0, self.seqnum(), self.kind())]
+pub struct KeyTrailer(U64<LittleEndian>);
 
 impl KeyTrailer {
     pub const fn new(seqnum: SeqNum, kind: KeyKind) -> Self {
-        Self((seqnum.get() << 8) | (kind as u64))
+        Self(U64::new((seqnum.get() << 8) | (kind as u64)))
     }
 
     pub const fn seqnum(&self) -> SeqNum {
         // SAFETY: we right shift by 8, so it's less than or equal to SeqNum::MAX
-        unsafe { SeqNum::new_unchecked(self.0 >> 8) }
+        unsafe { SeqNum::new_unchecked(self.0.get() >> 8) }
     }
 
     pub const fn kind(&self) -> KeyKind {
         // SAFETY: we mask by 0xFF to get the key kind bits,
         // which are always inserted by us and must thus be correct
-        unsafe { std::mem::transmute((self.0 & 0xFF) as u8) }
+        unsafe { std::mem::transmute((self.0.get() & 0xFF) as u8) }
     }
 
     /// Creates a key trailer for testing other parts of Tempest.
@@ -160,14 +173,14 @@ impl KeyTrailer {
 }
 
 #[derive(Debug, Clone)]
-pub struct InternalKey<C: Comparer = DefaultComparer> {
-    key: Bytes,
+pub struct InternalKey<C: Comparer = DefaultComparer, K: AsRef<[u8]> = Bytes> {
+    key: K,
     trailer: KeyTrailer,
     _marker: PhantomData<C>,
 }
 
-impl<C: Comparer> InternalKey<C> {
-    pub(crate) fn new(key: Bytes, trailer: KeyTrailer) -> Self {
+impl<C: Comparer, K: AsRef<[u8]>> InternalKey<C, K> {
+    pub(crate) fn new(key: K, trailer: KeyTrailer) -> Self {
         Self {
             key,
             trailer,
@@ -175,47 +188,49 @@ impl<C: Comparer> InternalKey<C> {
         }
     }
 
-    pub(crate) fn trailer(&self) -> KeyTrailer {
+    pub(crate) const fn trailer(&self) -> KeyTrailer {
         self.trailer
     }
 
-    pub(crate) fn key(&self) -> &Bytes {
+    pub(crate) const fn key(&self) -> &K {
         &self.key
     }
+}
 
+impl<C: Comparer> InternalKey<C, Bytes> {
     /// Generate an internal key for testing other parts of Tempest.
     /// Test keys with a higher ID will be greater than ones with a lower ID.
     /// This is useful to test correctness of internal ordering.
     #[cfg(test)]
     pub(crate) fn test(id: u64) -> Self {
-        let user_key = Bytes::from(id.to_be_bytes().to_vec());
-        Self::new(user_key, KeyTrailer::test())
+        let test_key = Bytes::from(id.to_be_bytes().to_vec());
+        Self::new(test_key, KeyTrailer::test())
     }
 
     // Test helper that gets the key as an easily comparable `u64` value.
     #[cfg(test)]
-    pub(crate) fn user_key_as_u64(&self) -> u64 {
+    pub(crate) fn test_key_as_u64(&self) -> u64 {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(self.key.as_ref());
         u64::from_be_bytes(buf)
     }
 }
 
-impl<C: Comparer> cmp::PartialEq for InternalKey<C> {
+impl<C: Comparer, K: AsRef<[u8]>> cmp::PartialEq for InternalKey<C, K> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other).is_eq()
     }
 }
 
-impl<C: Comparer> cmp::Eq for InternalKey<C> {}
+impl<C: Comparer, K: AsRef<[u8]>> cmp::Eq for InternalKey<C, K> {}
 
-impl<C: Comparer> cmp::PartialOrd for InternalKey<C> {
+impl<C: Comparer, K: AsRef<[u8]>> cmp::PartialOrd for InternalKey<C, K> {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<C: Comparer> cmp::Ord for InternalKey<C> {
+impl<C: Comparer, K: AsRef<[u8]>> cmp::Ord for InternalKey<C, K> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         let c = C::default();
 

@@ -395,9 +395,8 @@ mod tests {
         let mut merger = MergingIterator::<DefaultComparer>::new(sources);
         let mut results = Vec::new();
 
-        // Beautiful async loop
         while let Ok(Some(())) = merger.next().await {
-            results.push(merger.key().unwrap().user_key_as_u64());
+            results.push(merger.key().unwrap().test_key_as_u64());
         }
 
         assert_eq!(results, vec![1, 2, 3, 4]);
@@ -447,7 +446,7 @@ mod tests {
         // we'd use a manual poll, but for behavior, next().await is sufficient.
         let res = merger.next().await;
         assert!(matches!(res, Ok(Some(()))));
-        assert_eq!(merger.key().unwrap().user_key_as_u64(), 1);
+        assert_eq!(merger.key().unwrap().test_key_as_u64(), 1);
     }
 
     #[tokio::test]
