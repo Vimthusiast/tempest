@@ -1,5 +1,7 @@
 # Tempest DB
 
+[![wakatime](https://wakatime.com/badge/github/Vimthusiast/tempest.svg)](https://wakatime.com/badge/github/Vimthusiast/tempest)
+
 A modern database system that aims to reduce the pain I feel, everytime I have to do
 anything that has to do with changing my schema or querying for data.
 
@@ -20,7 +22,7 @@ Old SQL-based database systems have...
 ## Current Progress
 
 * **Storage Silos:** Shared-nothing architecture using `io_uring` for high-performance I/O.
-* **LSM-Tree Key-Value Storage:** Completed Manifest and MemTable. Working on the Write-Ahead Log, before SSTs.
+* **LSM-Tree Key-Value Storage:** Completed Manifest, MemTable, WAL. Working on the SSTs right now.
 * **Hybrid Logical Clocks (HLC):** Maintaining causality across distributed silos.
 * **Iterator Layer:** High-performance collection of $k$-way iterators for read paths, combined
   through the merge iterator implementation to collect from all the sources.
