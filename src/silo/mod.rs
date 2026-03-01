@@ -19,10 +19,13 @@ use crate::{
     fio::FioFS,
     silo::{
         batch::WriteBatch,
-        iterator::{DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry},
-        manifest::SiloManifest,
+        iterator::{
+            DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry, SyncIterator,
+        },
+        manifest::{ManifestRequest, SiloManifest, SstMetadata, get_sst_path},
         memtable::MemTable,
-        wal::{SiloWal, WalStatus},
+        sst::{reader::SstReader, writer::SstWriter},
+        wal::SiloWal,
     },
 };
 
@@ -38,12 +41,19 @@ pub mod memtable;
 pub mod sst;
 pub mod wal;
 
+/// Determines the size threshold for flushing a memtable
+pub const MEMTABLE_SIZE_THRESHOLD: usize = 512;
+/// Established back pressure by stalling writes if too many pile up
+pub const MAX_IMMUTABLE_COUNT: usize = 4;
+
 #[derive(Debug)]
-pub(crate) struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
+pub struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
     /// The ID of this silo.
     id: u64,
     /// The root directory for this silo.
     root_dir: PathBuf,
+    /// The file system that is backing this silo.
+    fs: F,
 
     /// The manifest that manages state of this silo.
     manifest: SiloManifest<F>,
@@ -80,7 +90,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
         // initialize wal
         let (wal, mut recovery_reader) =
-            SiloWal::init(fs, root_dir.clone(), filenums.next().unwrap()).await?;
+            SiloWal::init(fs.clone(), root_dir.clone(), filenums.next().unwrap()).await?;
 
         // initialize memtables
         let active = MemTable::new();
@@ -89,6 +99,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         let mut silo = Self {
             id,
             root_dir,
+            fs,
 
             // -- manager components --
             manifest,
@@ -129,7 +140,6 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         let seqnum = self.get_seqnum().await?;
         batch.commit(seqnum);
         trace!(?seqnum, "batch stamped with seqnum");
-
         let body = batch.take_buf().freeze();
 
         // -- persist in wal --
@@ -147,6 +157,9 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         //    WalStatus::Ok => {},
         //    WalStatus::NeedsRotation => self.wal.rotate(),
         //}
+
+        self.maybe_freeze();
+        self.maybe_flush().await?;
 
         Ok(())
     }
@@ -205,8 +218,83 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         Ok(())
     }
 
+    fn maybe_freeze(&mut self) {
+        if self.active.approximate_size() >= MEMTABLE_SIZE_THRESHOLD {
+            self.freeze_current_memtable();
+        }
+    }
+
+    fn freeze_current_memtable(&mut self) {
+        let frozen = std::mem::replace(&mut self.active, MemTable::new());
+        self.immutables.insert(0, Arc::new(frozen));
+    }
+
+    async fn maybe_flush(&mut self) -> TempestResult<()> {
+        while !self.immutables.is_empty() {
+            self.flush_oldest_immutable().await?;
+        }
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    async fn flush_oldest_immutable(&mut self) -> TempestResult<()> {
+        let imm = self.immutables.last().expect("checked by caller");
+
+        let entry_count = imm.len();
+        let min_key = imm.min_key().expect("non-empty immutable").key().clone();
+        let max_key = imm.max_key().expect("non-empty immutable").key().clone();
+        let min_seqnum = imm.min_seqnum().expect("non-empty immutable");
+        let max_seqnum = imm.max_seqnum().expect("non-empty immutable");
+        debug!(
+            entry_count,
+            ?min_key,
+            ?max_key,
+            ?min_seqnum,
+            ?max_seqnum,
+            "flushing oldest memtable to sst"
+        );
+
+        let filenum_range = self.manifest.get_filenums(1).await?;
+        let filenum = filenum_range.start;
+        let level = 0;
+
+        let sst_path = get_sst_path(&self.root_dir, level, filenum);
+        debug!(filenum, ?sst_path, "determined filenum");
+        // TODO: should we have ssts in a fs hierarchy even?
+        self.fs.create_dir_all(sst_path.parent().unwrap()).await?;
+        let file = self
+            .fs
+            .opts()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&sst_path)
+            .await?;
+
+        let mut writer = SstWriter::<_, C>::new(file, entry_count);
+        writer.extend_from_collection(imm.iter()).await?;
+        let file_size = writer.finalize().await?;
+
+        let metadata = SstMetadata {
+            filenum,
+            file_size,
+            level,
+            min_key,
+            max_key,
+            min_seqnum,
+            max_seqnum,
+        };
+        self.manifest
+            .handle_request(ManifestRequest::new().with_ssts_added([metadata]))
+            .await?;
+
+        self.immutables.pop();
+
+        Ok(())
+    }
+
     #[instrument(skip_all, level = "debug")]
-    pub(crate) async fn get(&self, key: Bytes, snapshot: SeqNum) -> TempestResult<Option<Bytes>> {
+    pub(crate) async fn get(&self, key: &Bytes, snapshot: SeqNum) -> TempestResult<Option<Bytes>> {
         if let Some(active_result) = self.active.get(&key, snapshot) {
             return Ok(Some(active_result));
         }
@@ -217,22 +305,52 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             }
         }
 
+        let search_key =
+            InternalKey::<C>::new(key.clone(), KeyTrailer::new(snapshot, KeyKind::MAX));
+        for sst_meta in self.manifest.ssts() {
+            let path = get_sst_path(&self.root_dir, sst_meta.level, sst_meta.filenum);
+            let file = self.fs.opts().read(true).open(&path).await?;
+            let reader = SstReader::<_, C>::open(file).await?;
+            if let Some(value) = reader.get(&search_key).await? {
+                return Ok(Some(value));
+            }
+        }
+
         Ok(None)
     }
 
     #[instrument(skip_all, level = "debug")]
-    pub(crate) fn scan(&self) -> DeduplicatingIterator<'_, MergingIterator<'_, C>, C> {
+    pub(crate) async fn scan(
+        &self,
+    ) -> TempestResult<DeduplicatingIterator<'_, MergingIterator<'_, C>, C>> {
         let mut sources = Vec::new();
-        sources.push(MergingIteratorHeapEntry::new(self.active.iter(), u64::MAX));
 
+        // -- pull from active memtable --
+        sources.push(MergingIteratorHeapEntry::new(
+            SyncIterator::new(self.active.iter()),
+            u64::MAX,
+        ));
+
+        // -- pull from immutable memtables --
         for (idx, imm) in self.immutables.iter().enumerate() {
             sources.push(MergingIteratorHeapEntry::new(
-                imm.iter(),
+                SyncIterator::new(imm.iter()),
                 u64::MAX - (idx as u64 + 1),
             ));
         }
 
-        DeduplicatingIterator::new(MergingIterator::new(sources))
+        // -- pull from ssts --
+        for sst_meta in self.manifest.ssts() {
+            let path = get_sst_path(&self.root_dir, sst_meta.level, sst_meta.filenum);
+            let file = self.fs.opts().read(true).open(&path).await?;
+            let reader = SstReader::<_, C>::open(file).await?;
+            sources.push(MergingIteratorHeapEntry::new(
+                reader.iter(),
+                sst_meta.filenum,
+            ));
+        }
+
+        Ok(DeduplicatingIterator::new(MergingIterator::new(sources)))
     }
 
     pub(crate) const fn highest_seqnum(&self) -> SeqNum {
@@ -254,6 +372,13 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         info!("shut down manifest");
 
         Ok(())
+    }
+
+    /// Test only helper that forces the current active memtable to be frozen to the immutables.
+    #[cfg(test)]
+    fn test_force_freeze(&mut self) {
+        debug!("force freezing current memtable");
+        self.freeze_current_memtable();
     }
 }
 
@@ -460,7 +585,7 @@ mod tests {
 
                     // verify that all values were persisted
                     for &(k, v) in &kvs {
-                        let found = silo.get(k.into(), silo.highest_seqnum()).await?;
+                        let found = silo.get(&k.into(), silo.highest_seqnum()).await?;
                         assert_eq!(
                             found.as_deref(),
                             Some(v),
@@ -487,7 +612,7 @@ mod tests {
                     for (i, &(k, _v)) in kvs.iter().enumerate() {
                         if i % 2 == 0 {
                             // TODO: use silo interface instead of accessing memtable
-                            let found_value = silo.get(k.into(), silo.highest_seqnum()).await?;
+                            let found_value = silo.get(&k.into(), silo.highest_seqnum()).await?;
                             assert!(found_value.is_none());
                         }
                     }
@@ -517,35 +642,34 @@ mod tests {
         let silo_span = span!(Level::INFO, "silo", id);
         tokio_uring::start(
             async {
+                info!("starting first silo");
                 {
-                    let mut silo: Silo<_, DefaultComparer> =
-                        Silo::init(id, fs.clone(), silo_dir).await.unwrap();
+                    let mut silo: Silo<_> = Silo::init(id, fs.clone(), silo_dir).await?;
 
                     // 1. Write initial data and move to immutables
                     let mut batch1 = WriteBatch::new();
                     batch1.put(b"key_a", b"value_old");
-                    silo.write(batch1).await.unwrap();
+                    silo.write(batch1).await?;
 
-                    // Simulate flush freeze
-                    let old_mem = std::mem::replace(&mut silo.active, MemTable::new());
-                    silo.immutables.push(Arc::new(old_mem));
+                    // Force a flush
+                    silo.test_force_freeze();
 
                     // 2. Write an update to "key_a" and a new "key_b"
                     let mut batch2 = WriteBatch::new();
                     batch2.put(b"key_a", b"value_new");
                     batch2.put(b"key_b", b"value_b");
-                    silo.write(batch2).await.unwrap();
+                    silo.write(batch2).await?;
 
-                    let mid_mem = std::mem::replace(&mut silo.active, MemTable::new());
-                    silo.immutables.push(Arc::new(mid_mem));
+                    // Force a flush
+                    silo.test_force_freeze();
 
                     // 3. Delete "key_b" in the currently active memtable
                     let mut batch3 = WriteBatch::new();
                     batch3.delete(b"key_b");
-                    silo.write(batch3).await.unwrap();
+                    silo.write(batch3).await?;
 
                     // --- Perform the Scan using the Beautiful Interface ---
-                    let mut scanner = silo.scan();
+                    let mut scanner = silo.scan().await?;
                     let mut results = Vec::new();
 
                     // Clean async loop - no more manual Context or Poll matching!
@@ -574,14 +698,14 @@ mod tests {
                     silo.shutdown().await.unwrap();
                 }
 
+                info!("starting second silo");
                 {
                     // re-open and verify the same scan results hold after recovery
-                    let mut silo: Silo<_, DefaultComparer> =
-                        Silo::init(id, fs.clone(), silo_dir).await.unwrap();
+                    let mut silo: Silo<_> = Silo::init(id, fs.clone(), silo_dir).await?;
 
-                    let mut scanner = silo.scan();
+                    let mut scanner = silo.scan().await?;
                     let mut results = Vec::new();
-                    while let Ok(Some(())) = scanner.next().await {
+                    while let Some(()) = scanner.next().await? {
                         let internal_key = scanner.key().unwrap();
                         results.push((
                             internal_key.key().clone(),
@@ -604,8 +728,82 @@ mod tests {
 
                     silo.shutdown().await.unwrap();
                 }
+
+                Ok::<_, TempestError>(())
             }
             .instrument(silo_span),
-        );
+        )
+        .unwrap();
+
+        fs.debug();
+    }
+
+    #[test]
+    fn test_silo_load() {
+        setup_tracing();
+
+        let id = 1;
+        let silo_dir = "silo-load-test";
+        let fs = VirtualFileSystem::new();
+
+        let silo_span = span!(Level::INFO, "silo", id);
+        tokio_uring::start(
+            async {
+                let batch_count = MEMTABLE_SIZE_THRESHOLD / 4;
+                let override_wrap = 1024;
+                let restart_interval = batch_count / 16;
+                let mut silo = Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir).await?;
+                for i in 0..batch_count {
+                    info!(i, "writing new batch");
+                    let is_first_or_last = i == 0 || i == batch_count;
+
+                    let mut batch = WriteBatch::new();
+                    let key_a = format!("keyA:{}", i % override_wrap);
+                    let value_a = format!("valueA:{}", i);
+                    batch.put(key_a.as_ref(), value_a.as_ref());
+
+                    let key_b = format!("keyB:{}", i % override_wrap);
+                    let value_b = format!("valueB:{}", i);
+                    batch.put(key_b.as_ref(), value_b.as_ref());
+
+                    if i % override_wrap == 0 && !is_first_or_last {
+                        batch.delete(key_a.as_ref());
+                    }
+
+                    silo.write(batch).await?;
+
+                    if i % restart_interval == 0 && !is_first_or_last {
+                        silo.shutdown().await?;
+                        silo = Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir).await?;
+                    }
+                    if i % override_wrap == 0 {
+                        info!("progress {:.2}%", (i as f64 / batch_count as f64) * 100.0)
+                    }
+                }
+                silo.shutdown().await?;
+
+                // reopen and verify final state
+                let mut silo = Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir).await?;
+                let snapshot = silo.highest_seqnum();
+
+                for i in 0..batch_count {
+                    let key_b = format!("keyB:{}", i % override_wrap);
+                    let found = silo.get(&Bytes::from(key_b), snapshot).await?;
+                    assert!(found.is_some(), "keyB:{} should exist", i % override_wrap);
+
+                    // keyA:0 gets deleted when i % override_wrap == 0 (and i != 0)
+                    // since batch_count < override_wrap, only keyA:0 at i=0 was written, never deleted
+                    // so all keyA entries should exist too in this test size
+                    let key_a = format!("keyA:{}", i % override_wrap);
+                    let found_a = silo.get(&Bytes::from(key_a), snapshot).await?;
+                    assert!(found_a.is_some(), "keyA:{} should exist", i % override_wrap);
+                }
+                silo.shutdown().await?;
+
+                Ok::<_, TempestError>(())
+            }
+            .instrument(silo_span),
+        )
+        .unwrap();
     }
 }

@@ -93,6 +93,20 @@ where
     }
 }
 
+impl<C, I> Iterator for SyncIterator<C, I>
+where
+    C: Comparer,
+    I: Iterator<Item = (InternalKey<C>, Bytes)>,
+{
+    type Item = (InternalKey<C>, Bytes);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.inner.next()?;
+        self.current = Some(item.clone());
+        Some(item)
+    }
+}
+
 impl<'a, C, I> TempestIterator<'a, C> for SyncIterator<C, I>
 where
     C: Comparer,

@@ -129,6 +129,38 @@ impl VirtualFileSystem {
         result.extend(components);
         result
     }
+
+    /// Debug print this file systems contents if trace verbosity is [`Level::DEBUG`] or higher.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the internal files are still accesses.
+    ///
+    /// [`Level::DEBUG`]: tracing::Level::DEBUG
+    #[cfg(test)]
+    pub fn debug(&self) {
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
+
+        println!("-- Virtual File System {:p} --", Arc::as_ptr(&self.files));
+        let files = self.files.try_read().expect("vfs not locked");
+        if !files.is_empty() {
+            println!();
+            for (path, file) in files.iter() {
+                use crate::base::PrettyBytes;
+
+                let file = file.try_read().expect("file not locked");
+                println!("-- {:?} --", path);
+                println!("{:?}\n", PrettyBytes(&file));
+            }
+
+            for path in files.iter().map(|(p, _)| p) {
+                println!("{:?}", path)
+            }
+        }
+        println!("Number of files: {}", files.len())
+    }
 }
 
 #[async_trait(?Send)]

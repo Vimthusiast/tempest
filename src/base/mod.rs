@@ -53,6 +53,7 @@ pub fn bincode_options() -> impl BincodeOptions {
 pub struct SeqNum(NonMaxU64);
 
 impl SeqNum {
+    /// The zero seqnum represent the absence of values when we have a seqnum range.
     pub const ZERO: Self = unsafe { Self::new_unchecked(0) };
 
     /// The sequence number one below the start.
@@ -173,6 +174,7 @@ impl KeyTrailer {
 }
 
 #[derive(Debug, Clone)]
+#[debug("InternalKey(key={:?}, seqnum={:?}, kind={:?})", key, trailer.seqnum(), trailer.kind())]
 pub struct InternalKey<C: Comparer = DefaultComparer, K: AsRef<[u8]> = Bytes> {
     key: K,
     trailer: KeyTrailer,

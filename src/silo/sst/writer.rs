@@ -6,11 +6,14 @@ use zerocopy::IntoBytes;
 use crate::{
     base::{Comparer, InternalKey, SST_MAGICNUM, TempestResult},
     fio::FioFile,
-    silo::sst::{
-        SstFooter,
-        block::{BlockBuilder, BlockStatus},
-        bloom::BloomFilterBuilder,
-        index::IndexBuilder,
+    silo::{
+        iterator::TempestIterator,
+        sst::{
+            SstFooter,
+            block::{BlockBuilder, BlockStatus},
+            bloom::BloomFilterBuilder,
+            index::IndexBuilder,
+        },
     },
 };
 
@@ -44,6 +47,27 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         }
     }
 
+    pub async fn extend_from_collection<I: IntoIterator<Item = (InternalKey<C>, Bytes)>>(
+        &mut self,
+        iter: I,
+    ) -> TempestResult<()> {
+        for (key, value) in iter {
+            self.write_entry(&key, &value).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn extend_from_stream<'a, I: TempestIterator<'a, C>>(
+        &mut self,
+        mut iter: I,
+    ) -> TempestResult<()> {
+        while let Some(()) = iter.next().await? {
+            self.write_entry(iter.key().unwrap(), iter.value().unwrap())
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn write_entry(&mut self, key: &InternalKey<C>, value: &Bytes) -> TempestResult<()> {
         // insert user key into bloom filter
         let c = C::default();
@@ -62,6 +86,7 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
             BlockStatus::Full => self.flush_block().await?,
         }
 
+        self.entries_written += 1;
         Ok(())
     }
 
@@ -81,7 +106,8 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         Ok(())
     }
 
-    pub async fn finalize(mut self) -> TempestResult<()> {
+    /// Finalize this SST and return the file size.
+    pub async fn finalize(mut self) -> TempestResult<u64> {
         // flush any remaining entries in the current block
         self.flush_block().await?;
 
@@ -116,8 +142,9 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
             .write_all_at(Bytes::copy_from_slice(footer.as_bytes()), self.filepos)
             .await;
         res?;
-        self.file.sync_all().await?;
+        self.filepos += size_of::<SstFooter>() as u64;
 
-        Ok(())
+        self.file.sync_all().await?;
+        Ok(self.filepos)
     }
 }

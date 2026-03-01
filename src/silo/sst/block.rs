@@ -3,10 +3,7 @@ use std::marker::PhantomData;
 use bytes::{BufMut, Bytes, BytesMut};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, Ref, U32};
 
-use crate::{
-    base::{Comparer, InternalKey, KeyTrailer},
-    silo::iterator::SyncIterator,
-};
+use crate::base::{Comparer, InternalKey, KeyTrailer};
 
 pub const BLOCK_TARGET_SIZE: usize = 4096;
 pub const BLOCK_RESTART_INTERVAL: u32 = 16;
@@ -273,8 +270,8 @@ impl<C: Comparer> BlockReader<C> {
         None
     }
 
-    pub fn iter(&self) -> SyncIterator<C, BlockIterator<C>> {
-        SyncIterator::new(BlockIterator::new(self.buf.clone()))
+    pub fn iter(&self) -> BlockIterator<C> {
+        BlockIterator::new(self.buf.clone())
     }
 }
 
@@ -395,7 +392,10 @@ mod tests {
             reader.get(&make_key("aaa", 1)).unwrap(),
             Bytes::from("first")
         );
-        assert_eq!(reader.get(&make_key("zzz", 1)).unwrap(), Bytes::from("last"));
+        assert_eq!(
+            reader.get(&make_key("zzz", 1)).unwrap(),
+            Bytes::from("last")
+        );
     }
 
     #[test]

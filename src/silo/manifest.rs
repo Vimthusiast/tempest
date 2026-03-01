@@ -5,7 +5,7 @@ use std::{
 };
 
 use bincode::Options as BincodeOptions;
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use crc64::crc64;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
@@ -22,11 +22,12 @@ use crate::{
 const SEQNUM_LIMIT_STEP: u64 = 1000;
 const FILENUM_LIMIT_STEP: u64 = 100;
 
-fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, file_number: u64) -> PathBuf {
+pub(super) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64) -> PathBuf {
     silo_root
         .as_ref()
+        .join("ssts")
         .join(format!("l-{}", level))
-        .join(format!("{}.sst", file_number))
+        .join(format!("{}.sst", filenum))
 }
 
 /// # SST Metadata
@@ -43,8 +44,8 @@ pub(super) struct SstMetadata {
 
     pub(super) level: u8,
 
-    pub(super) min_key: Vec<u8>,
-    pub(super) max_key: Vec<u8>,
+    pub(super) min_key: Bytes,
+    pub(super) max_key: Bytes,
 
     pub(super) min_seqnum: SeqNum,
     pub(super) max_seqnum: SeqNum,
@@ -928,6 +929,10 @@ impl<F: FioFS> SiloManifest<F> {
     /// Returns the next sequence number that will be used.
     pub(super) const fn seqnum_current(&self) -> SeqNum {
         self.seqnum_current
+    }
+
+    pub(super) fn ssts(&self) -> &[SstMetadata] {
+        &self.ssts
     }
 }
 
