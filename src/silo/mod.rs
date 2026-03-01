@@ -98,12 +98,20 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             fs.clone(),
             root_dir.clone(),
             filenums.next().unwrap(),
+            manifest.wal_filenums(),
             config.wal.clone(),
         )
         .await?;
 
+        let smallest_wal_filenum = manifest
+            .wal_filenums()
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or_else(|| wal.current_filenum());
+
         // initialize memtables
-        let active = MemTable::new();
+        let active = MemTable::new(smallest_wal_filenum);
         let immutables = Vec::new();
 
         let mut silo = Self {
@@ -132,9 +140,17 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
                     continue;
                 }
             };
-            if let Err(e) = silo.apply_batch_to_memtable(data.freeze()) {
-                warn!("failed to apply batch to memtable: {}, skipping", e);
+
+            let batch_seqnum = WriteBatch::seqnum(&data)?;
+            if batch_seqnum <= silo.manifest.max_flushed_seqnum() {
+                trace!(
+                    ?batch_seqnum,
+                    "skipping already flushed batch during recovery"
+                );
+                continue;
             }
+
+            silo.apply_batch_to_memtable(data.freeze())?;
         }
 
         info!("finished initializing silo");
@@ -237,7 +253,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
     }
 
     fn freeze_current_memtable(&mut self) {
-        let frozen = std::mem::replace(&mut self.active, MemTable::new());
+        let frozen = std::mem::replace(&mut self.active, MemTable::new(self.wal.current_filenum()));
         self.immutables.insert(0, Arc::new(frozen));
     }
 
@@ -272,7 +288,6 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
         let sst_path = get_sst_path(&self.root_dir, level, filenum);
         debug!(filenum, ?sst_path, "determined filenum");
-        // TODO: should we have ssts in a fs hierarchy even?
         self.fs.create_dir_all(sst_path.parent().unwrap()).await?;
         let file = self
             .fs
@@ -296,11 +311,35 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             min_seqnum,
             max_seqnum,
         };
-        self.manifest
-            .handle_request(ManifestRequest::new().with_ssts_added([metadata]))
-            .await?;
 
         self.immutables.pop();
+        trace!(?metadata, "finished flushing memtable to sst");
+
+        let min_remaining = self
+            .immutables
+            .iter()
+            .map(|imm| imm.wal_filenum())
+            .min()
+            .unwrap_or(self.active.wal_filenum())
+            // TODO: is active.wal_filenum() always greater than imm.wal_filenum()? -> omit this
+            .min(self.active.wal_filenum());
+
+        let filenums_to_remove: Vec<_> = self
+            .manifest
+            .wal_filenums()
+            .iter()
+            .copied()
+            .filter(|&f| f < min_remaining)
+            .collect();
+
+        trace!(?filenums_to_remove, "removing unused wals from manifest");
+        self.manifest
+            .handle_request(
+                ManifestRequest::new()
+                    .with_ssts_added([metadata])
+                    .with_wal_filenums_removed(filenums_to_remove),
+            )
+            .await?;
 
         Ok(())
     }
@@ -838,6 +877,81 @@ mod tests {
                     assert!(found_a.is_some(), "keyA:{} should exist", i % override_wrap);
                 }
                 silo.shutdown().await?;
+
+                Ok::<_, TempestError>(())
+            }
+            .instrument(silo_span),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_recovery_seqnum_visibility() {
+        // Regression test: after recovery, entries replayed from WAL must be visible
+        // via highest_seqnum(). The bug was that highest_seqnum() returned the
+        // manifest's persisted seqnum_current, which was lower than the seqnums
+        // of WAL-replayed entries, causing them to be shadowed.
+        setup_tracing();
+        let id = 2;
+        let silo_dir = "silo-seqnum-visibility";
+        let fs = VirtualFileSystem::new();
+        let silo_span = span!(Level::INFO, "silo", id);
+        let mut config = SiloConfig::for_testing();
+        config.memtable.size_threshold = 64;
+
+        tokio_uring::start(
+            async {
+                // -- Phase 1: write enough to trigger at least one flush --
+                {
+                    let mut silo =
+                        Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir, config.clone())
+                            .await?;
+
+                    // force a flush by exceeding the memtable threshold
+                    let flush_batch_count = config.memtable.size_threshold;
+                    for i in 0..flush_batch_count {
+                        let mut batch = WriteBatch::new();
+                        batch.put(format!("f:{}", i).as_ref(), b"v");
+                        silo.write(batch).await?;
+                    }
+
+                    // -- Phase 2: write a few more entries that stay in WAL only --
+                    // these are the ones that must survive recovery and be visible
+                    let unflushed_keys = ["after:0", "after:1", "after:2"];
+                    for key in &unflushed_keys {
+                        let mut batch = WriteBatch::new();
+                        batch.put(key.as_ref(), b"present");
+                        silo.write(batch).await?;
+                    }
+
+                    silo.shutdown().await?;
+                }
+
+                // -- Phase 3: reopen and verify the unflushed entries are visible --
+                {
+                    let mut silo =
+                        Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir, config.clone())
+                            .await?;
+                    println!("{:#?}", silo);
+
+                    // This snapshot must be high enough to include the WAL-recovered entries.
+                    // Before the fix, highest_seqnum() returned the pre-recovery manifest value,
+                    // which was below the seqnums assigned to after:0/1/2.
+                    let snapshot = silo.highest_seqnum();
+
+                    for key in &["after:0", "after:1", "after:2"] {
+                        let found = silo.get(&Bytes::from(key.to_string()), snapshot).await?;
+                        assert!(
+                            found.is_some(),
+                            "key '{}' was written before shutdown but invisible after recovery \
+                         (highest_seqnum={:?}) - seqnum not advanced past WAL replay",
+                            key,
+                            snapshot,
+                        );
+                    }
+
+                    silo.shutdown().await?;
+                }
 
                 Ok::<_, TempestError>(())
             }

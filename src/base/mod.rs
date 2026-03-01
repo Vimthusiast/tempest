@@ -53,7 +53,7 @@ pub fn bincode_options() -> impl BincodeOptions {
 pub struct SeqNum(NonMaxU64);
 
 impl SeqNum {
-    /// The zero seqnum represent the absence of values when we have a seqnum range.
+    /// The zero seqnum represent the absence of any resonable seqnum, used as the lowest bound.
     pub const ZERO: Self = unsafe { Self::new_unchecked(0) };
 
     /// The sequence number one below the start.

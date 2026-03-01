@@ -89,13 +89,20 @@ impl<F: FioFS> Tempest<F> {
 
 #[cfg(test)]
 mod tests {
-    use tracing_subscriber::EnvFilter;
+
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_tree::HierarchicalLayer;
 
     use crate::base::SeqNum;
 
     pub(crate) fn setup_tracing() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
+        let layer = HierarchicalLayer::default()
+            .with_indent_lines(true)
+            .with_bracketed_fields(true);
+
+        let _ = tracing_subscriber::registry()
+            .with(layer)
+            .with(EnvFilter::from_default_env())
             .try_init();
     }
 

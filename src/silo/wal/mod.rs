@@ -4,111 +4,28 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use crc64::crc64;
 use futures::{StreamExt, TryStreamExt};
-use serde::{Deserialize, Serialize};
 use tokio_uring::buf::BoundedBuf;
 use tracing::{Instrument, Level};
 
 use crate::{
-    base::{ByteSize, HexU64, SILO_WAL_MAGICNUM, TempestError, TempestResult},
+    base::{ByteSize, HexU64, TempestError, TempestResult},
     fio::{FioFS, FioFile},
-    silo::config::WalConfig,
+    silo::{
+        config::WalConfig,
+        wal::format::{
+            SILO_WAL_DIR_NAME, SILO_WAL_HEADER_SIZE, SILO_WAL_RECORD_PREFIX_SIZE, WalHeader,
+            WalRecordPrefix,
+        },
+    },
 };
 
-#[derive(Debug)]
-pub struct WalHeader {
-    filenum: u64,
-}
-
-impl WalHeader {
-    #[inline]
-    pub const fn new(filenum: u64) -> Self {
-        Self { filenum }
-    }
-
-    #[inline]
-    pub const fn filenum(&self) -> u64 {
-        self.filenum
-    }
-
-    #[inline]
-    fn encode(&self) -> [u8; SILO_WAL_HEADER_SIZE] {
-        let mut buf = [0u8; SILO_WAL_HEADER_SIZE];
-        buf[0..8].copy_from_slice(SILO_WAL_MAGICNUM);
-        buf[8..16].copy_from_slice(&self.filenum.to_le_bytes());
-        buf
-    }
-
-    fn decode(buf: [u8; SILO_WAL_HEADER_SIZE]) -> io::Result<Self> {
-        let magic_bytes = &buf[0..8];
-        if magic_bytes != SILO_WAL_MAGICNUM {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "invalid magic number: not a write-ahead log file. expected {:?} but got {:?}.",
-                    SILO_WAL_MAGICNUM, magic_bytes
-                ),
-            ));
-        }
-
-        // copy filenum
-        let filenum = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-        Ok(Self { filenum })
-    }
-}
-
-/// This frames WAL records using a checksum of the data and the data length.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WalRecordPrefix {
-    checksum: u64,
-    len: u32,
-}
-
-impl WalRecordPrefix {
-    /// Creates a new record prefix for the supplied bytes,
-    /// by calculating the crc64 checksum and the length.
-    fn new(record: &[u8]) -> Self {
-        let checksum = crc64(0, record);
-        let len = record.len() as u32;
-        Self { checksum, len }
-    }
-
-    /// Calculates the checksum of `record` and compares it with the stored checksum.
-    /// The length of `record` must equal the stored `len`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `record.len()` is different from `self.len`.
-    #[inline]
-    fn is_valid_record(&self, record: &[u8]) -> bool {
-        assert_eq!(record.len(), self.len as usize);
-        let computed_checksum = crc64(0, record);
-        computed_checksum == self.checksum
-    }
-
-    /// Encodes this record prefix into bytes.
-    #[inline]
-    fn encode(&self) -> [u8; SILO_WAL_RECORD_PREFIX_SIZE] {
-        let mut buf = [0u8; SILO_WAL_RECORD_PREFIX_SIZE];
-        buf[0..8].copy_from_slice(&self.checksum.to_le_bytes());
-        buf[8..12].copy_from_slice(&self.len.to_le_bytes());
-        buf
-    }
-
-    /// Decodes this record prefix from a bytes slice.
-    #[inline]
-    fn decode(buf: [u8; SILO_WAL_RECORD_PREFIX_SIZE]) -> Self {
-        let checksum = u64::from_le_bytes(buf[0..8].try_into().unwrap());
-        let len = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-        Self { checksum, len }
-    }
-}
+mod format;
 
 // NOTE: extend this to a flag set if we add more variants later and add getters
 // => potentially bitmask this
 #[derive(Debug)]
-pub enum WalStatus {
+pub(crate) enum WalStatus {
     // Operation succeeded. No action required.
     Ok,
     // Operation succeeded, file needs to be rotated.
@@ -117,10 +34,10 @@ pub enum WalStatus {
 
 /// A loose value guard that ensures the WAL is flushed before proceeding with the inner data.
 #[must_use = "WAL data must be flushed to disk"]
-pub struct WalFlushRequired(pub WalStatus);
+pub(crate) struct WalFlushRequired(pub WalStatus);
 
 #[derive(Debug)]
-pub struct WalFileReader<F: FioFile> {
+struct WalFileReader<F: FioFile> {
     file: F,
     filepos: u64,
     endpos: u64,
@@ -139,7 +56,7 @@ impl<F: FioFile> WalFileReader<F> {
         }
     }
 
-    pub(crate) async fn next(&mut self) -> Option<TempestResult<BytesMut>> {
+    async fn next(&mut self) -> Option<TempestResult<BytesMut>> {
         if self.filepos >= self.endpos || self.had_error {
             return None;
         }
@@ -182,7 +99,7 @@ impl<F: FioFile> WalFileReader<F> {
             );
         }
         scratch.resize(SILO_WAL_RECORD_PREFIX_SIZE, 0);
-        let sliced_scratch = scratch.slice(..SILO_WAL_RECORD_PREFIX_SIZE);
+        let sliced_scratch = scratch.slice(..);
         let (res, sliced_scratch) = file.read_exact_at(sliced_scratch, current_pos).await;
         let scratch = sliced_scratch.into_inner();
         if let Err(e) = res {
@@ -236,9 +153,10 @@ pub struct WalRecoveryReader<F: FioFS> {
 impl<F: FioFS> WalRecoveryReader<F> {
     // TODO: Take in list of filenums to recover from manifest
     #[instrument(skip_all)]
-    async fn recover(fs: F, dir: impl AsRef<Path>) -> TempestResult<Self> {
+    async fn recover(fs: F, dir: impl AsRef<Path>, files: &[u64]) -> TempestResult<Self> {
         let dir = dir.as_ref();
         info!(?dir, "creating wal recovery reader");
+        // TODO: use injected files list instead of searching
         let entries: Vec<_> = fs
             .read_dir(dir)
             .await?
@@ -263,7 +181,7 @@ impl<F: FioFS> WalRecoveryReader<F> {
                         debug!("opened file");
 
                         let buf = BytesMut::zeroed(SILO_WAL_HEADER_SIZE);
-                        let sliced_buf = buf.slice(..SILO_WAL_HEADER_SIZE);
+                        let sliced_buf = buf.slice(..);
                         let (res, sliced_buf) = file.read_exact_at(sliced_buf, 0).await;
                         if let Err(e) = res {
                             error!("could not reader header: {}", e);
@@ -362,29 +280,26 @@ pub struct SiloWal<F: FioFS> {
 
     fs: F,
     current_file: <F as FioFS>::File,
+    filenum: u64,
     filepos: u64,
     record_count: u32,
 
     config: WalConfig,
 }
 
-// -- constants --
-pub const SILO_WAL_DIR_NAME: &str = "wal";
-pub const SILO_WAL_HEADER_SIZE: usize = 16;
-pub const SILO_WAL_RECORD_PREFIX_SIZE: usize = 12;
-
 impl<F: FioFS> SiloWal<F> {
     pub(crate) async fn init(
         fs: F,
         silo_dir: PathBuf,
         filenum: u64,
+        files: &[u64],
         config: WalConfig,
     ) -> TempestResult<(Self, WalRecoveryReader<F>)> {
         let wal_dir = silo_dir.join(SILO_WAL_DIR_NAME);
         info!("initializing silo write-ahead log at {:?}", wal_dir);
         fs.create_dir_all(&wal_dir).await?;
 
-        let recovery_reader = WalRecoveryReader::recover(fs.clone(), &wal_dir).await?;
+        let recovery_reader = WalRecoveryReader::recover(fs.clone(), &wal_dir, files).await?;
 
         let current_file_path = wal_dir.join(format!("{}.log", filenum));
         let current_file = fs
@@ -400,7 +315,7 @@ impl<F: FioFS> SiloWal<F> {
 
         let header = WalHeader::new(filenum);
         scratch.put_slice(&header.encode());
-        let sliced_scratch = scratch.slice(..SILO_WAL_HEADER_SIZE);
+        let sliced_scratch = scratch.slice(..);
         let (res, sliced_scratch) = current_file.write_all_at(sliced_scratch, 0).await;
         if let Err(e) = res {
             return Err(e.into());
@@ -415,6 +330,7 @@ impl<F: FioFS> SiloWal<F> {
 
             fs,
             current_file,
+            filenum,
             filepos: SILO_WAL_HEADER_SIZE as u64,
             record_count: 0,
 
@@ -493,9 +409,13 @@ impl<F: FioFS> SiloWal<F> {
     }
 
     /// Executes a flush of the WAL and returns the inner status from that flush.
-    pub async fn flush(&mut self, flush: WalFlushRequired) -> TempestResult<WalStatus> {
+    pub(crate) async fn flush(&mut self, flush: WalFlushRequired) -> TempestResult<WalStatus> {
         self.current_file.sync_all().await?;
         Ok(flush.0)
+    }
+
+    pub(super) fn current_filenum(&self) -> u64 {
+        self.filenum
     }
 }
 
@@ -517,17 +437,32 @@ mod tests {
         let mut next_filenum = filenum_gen();
         let data = Bytes::from_static(b"some-test-data");
 
+        let first_filenum = next_filenum();
+        let second_filenum = next_filenum();
+
         let config = SiloConfig::for_testing().wal;
         {
-            let (mut wal, mut recovery_reader) =
-                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum(), config.clone()).await?;
+            let (mut wal, mut recovery_reader) = SiloWal::init(
+                fs.clone(),
+                silo_dir.clone(),
+                first_filenum,
+                &[],
+                config.clone(),
+            )
+            .await?;
             let _ = wal.append(data.clone()).await?;
             assert!(recovery_reader.next().await.is_none());
         }
 
         {
-            let (_, mut recovery_reader) =
-                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum(), config.clone()).await?;
+            let (_, mut recovery_reader) = SiloWal::init(
+                fs.clone(),
+                silo_dir.clone(),
+                second_filenum,
+                &[first_filenum],
+                config.clone(),
+            )
+            .await?;
             assert_eq!(recovery_reader.next().await.unwrap().unwrap(), data);
             assert!(recovery_reader.next().await.is_none());
         }

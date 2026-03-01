@@ -1,7 +1,7 @@
 use bytes::{BufMut, BytesMut};
 use integer_encoding::VarInt;
 
-use crate::base::{KeyKind, PrettyBytes, SeqNum};
+use crate::base::{KeyKind, PrettyBytes, SeqNum, TempestResult};
 
 /// # Write Batch
 ///
@@ -89,6 +89,11 @@ impl WriteBatch {
             // this comes from the wal, so it has already been committed
             committed: true,
         }
+    }
+
+    pub fn seqnum(buf: &[u8]) -> TempestResult<SeqNum> {
+        let seqnum_raw = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        seqnum_raw.try_into()
     }
 
     /// Add a `put KEY=VALUE` command to this batch.
