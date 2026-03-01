@@ -22,7 +22,7 @@ use crate::{
         iterator::{DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry},
         manifest::SiloManifest,
         memtable::MemTable,
-        wal::SiloWal,
+        wal::{SiloWal, WalStatus},
     },
 };
 
@@ -35,6 +35,7 @@ pub mod batch;
 pub mod iterator;
 pub mod manifest;
 pub mod memtable;
+pub mod sst;
 pub mod wal;
 
 #[derive(Debug)]
@@ -133,11 +134,19 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
         // -- persist in wal --
         trace!("persisting batch in wal");
-        self.wal.append(body.clone()).await?;
+        let flush_required = self.wal.append(body.clone()).await?;
+        let wal_status = self.wal.flush(flush_required).await?;
 
         // -- commit to memtable --
         // TODO: unwrap here? check validity first? maybe this is fine
         self.apply_batch_to_memtable(body)?;
+
+        // TODO: Implement wal rotation
+        //
+        //match wal_status {
+        //    WalStatus::Ok => {},
+        //    WalStatus::NeedsRotation => self.wal.rotate(),
+        //}
 
         Ok(())
     }

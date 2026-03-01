@@ -57,15 +57,35 @@ where
     }
 }
 
-pub struct MemTableIterator<'a, C: Comparer> {
-    inner: std::iter::Peekable<std::collections::btree_map::Iter<'a, InternalKey<C>, Bytes>>,
+/// A [`TempestIterator`] adapter for synchronous, in-memory [`Iterator`]s.
+///
+/// Many data sources in Tempest (e.g. [`MemTable`], [`BlockIterator`]) are inherently
+/// synchronous and never need to return [`Poll::Pending`]. This wrapper allows any
+/// [`Iterator`] over `(InternalKey<C>, Bytes)` pairs to be used wherever a
+/// [`TempestIterator`] is expected, by always returning [`Poll::Ready`].
+///
+/// The current item is stored internally after each [`Iterator::next`] call and
+/// exposed via the [`TempestIterator::key`] and [`TempestIterator::value`] methods.
+pub struct SyncIterator<C, I>
+where
+    C: Comparer,
+    I: Iterator<Item = (InternalKey<C>, Bytes)>,
+{
+    /// The underlying synchronous iterator being wrapped.
+    inner: I,
+    /// The most recently yielded key-value pair, accessible via [`TempestIterator::key`]
+    /// and [`TempestIterator::value`]. `None` if the iterator has not been polled yet
+    /// or has been exhausted.
     current: Option<(InternalKey<C>, Bytes)>,
 }
 
-impl<'a, C: Comparer> MemTableIterator<'a, C> {
-    pub(super) fn new(
-        inner: std::iter::Peekable<std::collections::btree_map::Iter<'a, InternalKey<C>, Bytes>>,
-    ) -> Self {
+impl<C, I> SyncIterator<C, I>
+where
+    C: Comparer,
+    I: Iterator<Item = (InternalKey<C>, Bytes)>,
+{
+    /// Creates a new instance that adapts to `inner` synchronously.
+    pub(super) fn new(inner: I) -> Self {
         Self {
             inner,
             current: None,
@@ -73,7 +93,11 @@ impl<'a, C: Comparer> MemTableIterator<'a, C> {
     }
 }
 
-impl<'a, C: Comparer> TempestIterator<'a, C> for MemTableIterator<'a, C> {
+impl<'a, C, I> TempestIterator<'a, C> for SyncIterator<C, I>
+where
+    C: Comparer,
+    I: Iterator<Item = (InternalKey<C>, Bytes)>,
+{
     fn poll_next(&mut self, _cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
         if let Some((k, v)) = self.inner.next() {
             // cheap arc increments
@@ -127,8 +151,8 @@ impl<'a, C: Comparer> PartialOrd for MergingIteratorHeapEntry<'a, C> {
     }
 }
 
-// NB: When implementing ordering of max-heap entries, greater values will bubble up.
-// Therefore, when a is some and b is none, a > b.
+// NB: When implementing ordering of max-heap entries, greater values will bubble up,
+// therefore, when a is some and b is none, a > b.
 impl<'a, C: Comparer> Ord for MergingIteratorHeapEntry<'a, C> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.iter.key(), other.iter.key()) {
@@ -395,9 +419,8 @@ mod tests {
         let mut merger = MergingIterator::<DefaultComparer>::new(sources);
         let mut results = Vec::new();
 
-        // Beautiful async loop
         while let Ok(Some(())) = merger.next().await {
-            results.push(merger.key().unwrap().user_key_as_u64());
+            results.push(merger.key().unwrap().test_key_as_u64());
         }
 
         assert_eq!(results, vec![1, 2, 3, 4]);
@@ -447,7 +470,7 @@ mod tests {
         // we'd use a manual poll, but for behavior, next().await is sufficient.
         let res = merger.next().await;
         assert!(matches!(res, Ok(Some(()))));
-        assert_eq!(merger.key().unwrap().user_key_as_u64(), 1);
+        assert_eq!(merger.key().unwrap().test_key_as_u64(), 1);
     }
 
     #[tokio::test]

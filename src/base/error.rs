@@ -21,9 +21,6 @@ pub enum TempestError {
     #[display("failed to encode: {}", _0)]
     BincodeError(bincode::Error),
 
-    #[display("{}", _0)]
-    Other(#[error(not(source))] &'static str),
-
     #[display("invalid key kind: {}", _0.number)]
     InvalidKeyKind(TryFromPrimitiveError<KeyKind>),
 

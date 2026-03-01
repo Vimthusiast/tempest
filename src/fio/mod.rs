@@ -95,7 +95,7 @@ impl<F: FioFS> OpenBuilder<F> {
 ///
 /// A trait that abstracts asynchronous I/O from the file system.
 #[async_trait(?Send)]
-pub trait FioFile: Unpin {
+pub trait FioFile: Unpin + 'static {
     async fn sync_all(&self) -> io::Result<()>;
     async fn size(&self) -> io::Result<u64>;
 

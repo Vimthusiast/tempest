@@ -13,8 +13,16 @@ pub trait Comparer: Default + Clone + 'static {
     /// Compares the suffix part of two keys.
     fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
 
+    /// Splits the key and returns the prefix and suffix part.
+    fn split_up<'a>(&self, key: &'a [u8]) -> (&'a [u8], &'a [u8]) {
+        let knon = self.split(key);
+        key.split_at(knon)
+    }
+
     /// Compares the logical part (user facing) of a key.
-    /// Usually, this just compares the key prefix, but you may choose yourself.
+    /// By default, this will compare the prefixes, but a different strategy may be chosen.
+    /// This is used in things like key deduplication, e.g. during compaction, meaning
+    /// any part that is ignored during logical compare will end up being overshadowed.
     fn compare_logical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
         let anon = self.split(a);
         let bnon = self.split(b);
@@ -111,6 +119,12 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
     }
 }
 
+/// A [`Comparer`] that treats the last `N` bytes of a key as a fixed-size suffix,
+/// comparing both prefix and suffix lexicographically (byte-wise).
+///
+/// The interpretation of the suffix bytes is left entirely to the caller. For numeric
+/// values, big-endian encoding is recommended, as it preserves natural ordering under
+/// byte-wise comparison.
 #[derive(Default, Clone)]
 pub struct FixedSuffixComparer<const N: usize>;
 
