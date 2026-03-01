@@ -77,6 +77,7 @@ fn parse_index(buf: &[u8]) -> (&[u8], &[U32<LittleEndian>]) {
     (entries, offsets)
 }
 
+#[derive(Clone)]
 pub struct IndexReader<C: Comparer> {
     buf: Bytes,
     _marker: PhantomData<C>,
@@ -90,6 +91,21 @@ impl<C: Comparer> IndexReader<C> {
         }
     }
 
+    fn decode_entry(entries: &[u8], offset: usize) -> (InternalKey<C, &[u8]>, u64, u32) {
+        let (header, rest) = Ref::<_, IndexEntryHeader>::from_prefix(&entries[offset..]).unwrap();
+        let key_len = header.key_len.get() as usize;
+        let block_offset = header.block_offset.get();
+        let block_size = header.block_size.get();
+        let entry_key = &rest[..key_len];
+        let trailer =
+            KeyTrailer::read_from_bytes(&rest[key_len..key_len + size_of::<KeyTrailer>()]).unwrap();
+        (
+            InternalKey::new(entry_key, trailer),
+            block_offset,
+            block_size,
+        )
+    }
+
     /// Returns the (block_offset, block_size) of the block that may contain `key`,
     /// or None if the key is out of range.
     pub fn get_block_for<K: AsRef<[u8]>>(&self, key: &InternalKey<C, K>) -> Option<(u64, u32)> {
@@ -97,26 +113,9 @@ impl<C: Comparer> IndexReader<C> {
         let (entries, offsets) = parse_index(&self.buf);
         let c = C::default();
 
-        let decode_entry = |offset: usize| -> (InternalKey<C, &[u8]>, u64, u32) {
-            let (header, rest) =
-                Ref::<_, IndexEntryHeader>::from_prefix(&entries[offset..]).unwrap();
-            let key_len = header.key_len.get() as usize;
-            let block_offset = header.block_offset.get();
-            let block_size = header.block_size.get();
-            let entry_key = &rest[..key_len];
-            let trailer =
-                KeyTrailer::read_from_bytes(&rest[key_len..key_len + size_of::<KeyTrailer>()])
-                    .unwrap();
-            (
-                InternalKey::new(entry_key, trailer),
-                block_offset,
-                block_size,
-            )
-        };
-
         // binary search for the first entry whose key >= search key
         let result = offsets.binary_search_by(|offset| {
-            let (entry_key, _, _) = decode_entry(offset.get() as usize);
+            let (entry_key, _, _) = Self::decode_entry(entries, offset.get() as usize);
             c.compare_physical(entry_key.key(), key.key())
         });
 
@@ -127,7 +126,14 @@ impl<C: Comparer> IndexReader<C> {
             return None;
         }
 
-        let (_, block_offset, block_size) = decode_entry(offsets[i].get() as usize);
+        let (_, block_offset, block_size) = Self::decode_entry(entries, offsets[i].get() as usize);
+        Some((block_offset, block_size))
+    }
+
+    pub fn get_block_by_index(&self, index: usize) -> Option<(u64, u32)> {
+        let (entries, offsets) = parse_index(&self.buf);
+        let offset = offsets.get(index)?.get() as usize;
+        let (_, block_offset, block_size) = Self::decode_entry(entries, offset);
         Some((block_offset, block_size))
     }
 }

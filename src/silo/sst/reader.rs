@@ -1,4 +1,10 @@
-use std::{io, marker::PhantomData};
+use std::{
+    io,
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use bytes::{Bytes, BytesMut};
 use tokio_uring::buf::BoundedBuf;
@@ -7,11 +13,96 @@ use zerocopy::FromBytes;
 use crate::{
     base::{Comparer, InternalKey, SST_MAGICNUM, TempestResult},
     fio::FioFile,
-    silo::sst::{SstFooter, block::BlockReader, bloom::BloomFilter, index::IndexReader},
+    silo::{
+        iterator::TempestIterator,
+        sst::{
+            SstFooter,
+            block::{BlockIterator, BlockReader},
+            bloom::BloomFilter,
+            index::IndexReader,
+        },
+    },
 };
 
+pub struct SstIterator<F: FioFile, C: Comparer> {
+    /// the file we are reading
+    file: Arc<F>,
+    /// the key we got through polling
+    current_key: Option<(InternalKey<C>, Bytes)>,
+    /// the current block we are on
+    current_block: Option<BlockIterator<C>>,
+    /// index reader for the block index
+    index: IndexReader<C>,
+    /// the position of the current block within the index
+    index_pos: usize,
+    /// in-progress block load future
+    loading: Option<Pin<Box<dyn Future<Output = TempestResult<Bytes>>>>>,
+    _marker: PhantomData<C>,
+}
+
+impl<F: FioFile, C: Comparer> SstIterator<F, C> {
+    pub fn new(file: Arc<F>, index: IndexReader<C>) -> Self {
+        Self {
+            file,
+            current_key: None,
+            current_block: None,
+            index,
+            index_pos: 0,
+            loading: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<F: FioFile, C: Comparer> TempestIterator<'_, C> for SstIterator<F, C> {
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<TempestResult<Option<()>>> {
+        loop {
+            if let Some(loading) = &mut self.loading {
+                match loading.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(buf)) => {
+                        self.loading = None;
+                        self.current_block = Some(BlockIterator::new(buf));
+                    }
+                }
+            }
+
+            if let Some(block) = &mut self.current_block {
+                if let Some((key, value)) = block.next() {
+                    self.current_key = Some((key, value));
+                    return Poll::Ready(Ok(Some(())));
+                }
+                self.current_block = None;
+                self.index_pos += 1;
+            }
+
+            let Some((block_offset, block_size)) = self.index.get_block_by_index(self.index_pos)
+            else {
+                return Poll::Ready(Ok(None));
+            };
+
+            let file = self.file.clone();
+            self.loading = Some(Box::pin(async move {
+                let buf = BytesMut::zeroed(block_size as usize);
+                let (res, buf) = file.read_exact_at(buf.slice(..), block_offset).await;
+                res?;
+                Ok(buf.into_inner().freeze())
+            }));
+        }
+    }
+
+    fn key(&self) -> Option<&InternalKey<C>> {
+        self.current_key.as_ref().map(|(k, _v)| k)
+    }
+
+    fn value(&self) -> Option<&Bytes> {
+        self.current_key.as_ref().map(|(_k, v)| v)
+    }
+}
+
 pub struct SstReader<F: FioFile, C: Comparer> {
-    file: F,
+    file: Arc<F>,
     bloom: BloomFilter,
     index: IndexReader<C>,
     _marker: PhantomData<C>,
@@ -19,6 +110,7 @@ pub struct SstReader<F: FioFile, C: Comparer> {
 
 impl<F: FioFile, C: Comparer> SstReader<F, C> {
     pub async fn open(file: F) -> TempestResult<Self> {
+        let file = Arc::new(file);
         // read footer
         let file_size = file.size().await?;
         let footer_offset = file_size - size_of::<SstFooter>() as u64;
@@ -95,5 +187,9 @@ impl<F: FioFile, C: Comparer> SstReader<F, C> {
         // search within the block
         let reader = BlockReader::<C>::new(block_buf.freeze());
         Ok(reader.get(key))
+    }
+
+    pub fn iter(&self) -> SstIterator<F, C> {
+        SstIterator::new(self.file.clone(), self.index.clone())
     }
 }
