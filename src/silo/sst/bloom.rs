@@ -24,6 +24,12 @@ pub struct BloomFilter {
 }
 
 impl BloomFilter {
+    pub fn from_parts(bits: Bytes, footer: BloomFilterFooter) -> Self {
+        let k = footer.k.get();
+        let m = footer.m.get();
+        Self { bits, k, m }
+    }
+
     pub fn maybe_contains(&self, key: &[u8]) -> bool {
         for i in 0..self.k {
             let bit = xxh3_64_with_seed(key, i) % self.m;
@@ -32,6 +38,10 @@ impl BloomFilter {
             }
         }
         true
+    }
+
+    pub fn bits(&self) -> &Bytes {
+        &self.bits
     }
 
     pub fn footer(&self) -> BloomFilterFooter {

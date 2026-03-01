@@ -18,6 +18,13 @@ pub struct IndexFooter {
     entry_count: U32<LittleEndian>,
 }
 
+impl IndexFooter {
+    fn new(entry_count: impl Into<U32<LittleEndian>>) -> Self {
+        let entry_count = entry_count.into();
+        Self { entry_count }
+    }
+}
+
 pub struct IndexBuilder {
     buf: BytesMut,
     entry_offsets: Vec<u32>,
@@ -52,9 +59,7 @@ impl IndexBuilder {
 
     pub fn finalize(mut self) -> BytesMut {
         self.buf.put(self.entry_offsets.as_slice().as_bytes());
-        let footer = IndexFooter {
-            entry_count: (self.entry_offsets.len() as u32).into(),
-        };
+        let footer = IndexFooter::new(self.entry_offsets.len() as u32);
         self.buf.put(footer.as_bytes());
         self.buf
     }
@@ -115,10 +120,8 @@ impl<C: Comparer> IndexReader<C> {
             c.compare_physical(entry_key.key(), key.key())
         });
 
-        let i = match result {
-            Ok(i) => i,
-            Err(i) => i, // first entry whose key > search key, may still contain it
-        };
+        // we still check if first > key, because we just have the last block key in the index
+        let i = result.unwrap_or_else(|i| i);
 
         if i >= offsets.len() {
             return None;

@@ -205,7 +205,7 @@ impl<C: Comparer> BlockReader<C> {
         }
     }
 
-    pub fn get<K: AsRef<[u8]>>(&self, key: InternalKey<C, K>) -> Option<Bytes> {
+    pub fn get<K: AsRef<[u8]>>(&self, key: &InternalKey<C, K>) -> Option<Bytes> {
         // convert this generic key to a borrowed key so we can compare it with ours
         let key = InternalKey::<C, &[u8]>::new(key.key().as_ref(), key.trailer());
 
@@ -314,7 +314,7 @@ mod tests {
             ("cherry", 1, "red"),
         ]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
-        let result = reader.get(make_key("banana", 1));
+        let result = reader.get(&make_key("banana", 1));
         assert_eq!(result.unwrap(), Bytes::from("yellow"));
     }
 
@@ -322,21 +322,21 @@ mod tests {
     fn test_get_missing_key() {
         let buf = build_block(&[("apple", 1, "fruit"), ("cherry", 1, "red")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
-        assert!(reader.get(make_key("banana", 1)).is_none());
+        assert!(reader.get(&make_key("banana", 1)).is_none());
     }
 
     #[test]
     fn test_get_key_before_first() {
         let buf = build_block(&[("banana", 1, "yellow"), ("cherry", 1, "red")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
-        assert!(reader.get(make_key("apple", 1)).is_none());
+        assert!(reader.get(&make_key("apple", 1)).is_none());
     }
 
     #[test]
     fn test_get_key_after_last() {
         let buf = build_block(&[("apple", 1, "fruit"), ("banana", 1, "yellow")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
-        assert!(reader.get(make_key("cherry", 1)).is_none());
+        assert!(reader.get(&make_key("cherry", 1)).is_none());
     }
 
     #[test]
@@ -358,7 +358,7 @@ mod tests {
         for i in [0, 1, 15, 16, 17, 31, 32, 39] {
             let key = format!("prefix:key:{:04}", i);
             let expected = format!("value:{}", i);
-            let result = reader.get(make_key(&key, 1));
+            let result = reader.get(&make_key(&key, 1));
             assert_eq!(
                 result.unwrap(),
                 Bytes::copy_from_slice(expected.as_bytes()),
@@ -392,17 +392,17 @@ mod tests {
         ]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
         assert_eq!(
-            reader.get(make_key("aaa", 1)).unwrap(),
+            reader.get(&make_key("aaa", 1)).unwrap(),
             Bytes::from("first")
         );
-        assert_eq!(reader.get(make_key("zzz", 1)).unwrap(), Bytes::from("last"));
+        assert_eq!(reader.get(&make_key("zzz", 1)).unwrap(), Bytes::from("last"));
     }
 
     #[test]
     fn test_empty_value() {
         let buf = build_block(&[("key", 1, "")]);
         let reader = BlockReader::<DefaultComparer>::new(buf);
-        assert_eq!(reader.get(make_key("key", 1)).unwrap(), Bytes::new());
+        assert_eq!(reader.get(&make_key("key", 1)).unwrap(), Bytes::new());
     }
 
     #[test]
@@ -511,7 +511,7 @@ mod tests {
         let reader = BlockReader::<DefaultComparer>::new(buf.clone());
 
         for (key, value) in BlockIterator::<DefaultComparer>::new(buf) {
-            let found = reader.get(key);
+            let found = reader.get(&key);
             assert_eq!(found.unwrap(), value);
         }
     }
