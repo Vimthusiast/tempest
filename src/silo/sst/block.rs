@@ -5,9 +5,6 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, Ref, 
 
 use crate::base::{Comparer, InternalKey, KeyTrailer};
 
-pub const BLOCK_TARGET_SIZE: usize = 4096;
-pub const BLOCK_RESTART_INTERVAL: u32 = 16;
-
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
 #[repr(C)]
 pub struct BlockEntryHeader {
@@ -32,22 +29,29 @@ pub struct BlockBuilder {
     entry_count: u32,
     last_key: Option<Bytes>,
     restart_offsets: Vec<u32>,
+
+    // config options
+    target_size: usize,
+    restart_interval: u32,
 }
 
 impl BlockBuilder {
-    pub fn new() -> Self {
+    pub fn new(target_size: usize, restart_interval: u32) -> Self {
         Self {
             // NB: we multiply by 2 here, to ideally prevent reallocations, otherwise it end up
             // reallocating at least once when writing the footer in `finalize()`
-            buf: BytesMut::with_capacity(BLOCK_TARGET_SIZE * 2),
+            buf: BytesMut::with_capacity(target_size * 2),
             entry_count: 0,
             last_key: None,
             restart_offsets: Vec::new(),
+
+            target_size,
+            restart_interval,
         }
     }
 
     pub fn write_entry(&mut self, key: &Bytes, trailer: KeyTrailer, value: &Bytes) -> BlockStatus {
-        let restart_point_reached = self.entry_count % BLOCK_RESTART_INTERVAL == 0;
+        let restart_point_reached = self.entry_count % self.restart_interval == 0;
         if restart_point_reached {
             self.last_key = None;
             self.restart_offsets.push(self.buf.len() as u32);
@@ -92,7 +96,7 @@ impl BlockBuilder {
     }
 
     pub fn get_status(&self) -> BlockStatus {
-        let is_full = self.buf.len() >= BLOCK_TARGET_SIZE;
+        let is_full = self.buf.len() >= self.target_size;
         if is_full {
             BlockStatus::Full
         } else {
@@ -278,7 +282,10 @@ impl<C: Comparer> BlockReader<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
+    use crate::{
+        base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
+        silo::config::SiloConfig,
+    };
     use bytes::Bytes;
 
     fn make_trailer(seqnum: u64, kind: KeyKind) -> KeyTrailer {
@@ -293,7 +300,9 @@ mod tests {
     }
 
     fn build_block(entries: &[(&str, u64, &str)]) -> Bytes {
-        let mut builder = BlockBuilder::new();
+        let config = SiloConfig::for_testing().sst;
+        let mut builder =
+            BlockBuilder::new(config.block_target_size, config.block_restart_interval);
         for (key, seqnum, value) in entries {
             let k = Bytes::copy_from_slice(key.as_bytes());
             let v = Bytes::copy_from_slice(value.as_bytes());
@@ -367,9 +376,11 @@ mod tests {
 
     #[test]
     fn test_restart_offsets_written_in_finalize() {
-        // a block with exactly BLOCK_RESTART_INTERVAL + 1 entries should have 2 restart points
-        let mut builder = BlockBuilder::new();
-        for i in 0..=BLOCK_RESTART_INTERVAL {
+        // a block with exactly block_restart_interval + 1 entries should have 2 restart points
+        let target_size = 4096;
+        let restart_interval = 4;
+        let mut builder = BlockBuilder::new(target_size, restart_interval);
+        for i in 0..=restart_interval {
             let k = Bytes::copy_from_slice(format!("key:{:04}", i).as_bytes());
             let v = Bytes::from("v");
             builder.write_entry(&k, make_trailer(1, KeyKind::Put), &v);
@@ -468,7 +479,9 @@ mod tests {
 
     #[test]
     fn test_iterator_trailers_preserved() {
-        let mut builder = BlockBuilder::new();
+        let config = SiloConfig::for_testing().sst;
+        let mut builder =
+            BlockBuilder::new(config.block_target_size, config.block_restart_interval);
         let k = Bytes::from("key");
         let v = Bytes::from("val");
         let trailer = make_trailer(42, KeyKind::Put);

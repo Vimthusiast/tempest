@@ -29,7 +29,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U64};
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.
-pub const SST_MAGICNUM: &[u8; 8] = b"TMPS_SST";
+pub const SILO_SST_MAGICNUM: &[u8; 8] = b"TMPS_SST";
 
 /// Magic number for the silo manifest files, as a first check for file validation.
 /// Stored in the header, at the start of a `MANIFEST-*` file.

@@ -26,6 +26,7 @@ mod tests {
     use super::writer::SstWriter;
     use crate::base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
     use crate::fio::{FioFS, FioFile, VirtualFile, VirtualFileSystem};
+    use crate::silo::config::SiloConfig;
     use crate::silo::iterator::TempestIterator;
     use bytes::Bytes;
 
@@ -58,7 +59,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut writer = SstWriter::<_, DefaultComparer>::new(file, entries.len());
+        let config = SiloConfig::for_testing().sst;
+        let mut writer = SstWriter::<_, DefaultComparer>::new(file, entries.len(), config);
         for (key, seqnum, value) in entries {
             let k = make_key(key, *seqnum);
             let v = Bytes::copy_from_slice(value.as_bytes());
@@ -231,7 +233,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut writer = SstWriter::<_, DefaultComparer>::new(file, 2);
+        let config = SiloConfig::for_testing().sst;
+        let mut writer = SstWriter::<_, DefaultComparer>::new(file, 2, config);
         // tombstone - delete marker with higher seqnum
         // NB: higher seqnum comes first!
         writer
@@ -369,7 +372,8 @@ mod tests {
             .await
             .unwrap();
 
-        let mut writer = SstWriter::<_, DefaultComparer>::new(file, 2);
+        let config = SiloConfig::for_testing().sst;
+        let mut writer = SstWriter::<_, DefaultComparer>::new(file, 2, config);
         writer
             .write_entry(&make_delete_key("apple", 2), &Bytes::new())
             .await

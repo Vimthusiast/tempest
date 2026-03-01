@@ -4,9 +4,10 @@ use bytes::Bytes;
 use zerocopy::IntoBytes;
 
 use crate::{
-    base::{Comparer, InternalKey, SST_MAGICNUM, TempestResult},
+    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
     fio::FioFile,
     silo::{
+        config::SstConfig,
         iterator::TempestIterator,
         sst::{
             SstFooter,
@@ -17,8 +18,6 @@ use crate::{
     },
 };
 
-const FALSE_POSITIVE_RATE: f64 = 0.01;
-
 pub struct SstWriter<F: FioFile, C: Comparer> {
     file: F,
     filepos: u64,
@@ -28,21 +27,26 @@ pub struct SstWriter<F: FioFile, C: Comparer> {
     index_builder: IndexBuilder,
     bloom_builder: BloomFilterBuilder,
     last_key: Option<InternalKey<C>>,
+    config: SstConfig,
     _marker: PhantomData<C>,
 }
 
 impl<F: FioFile, C: Comparer> SstWriter<F, C> {
     /// Create a new writer for a total of `n` entries.
-    pub fn new(file: F, entries: usize) -> Self {
+    pub fn new(file: F, entries: usize, config: SstConfig) -> Self {
         Self {
             file,
             filepos: 0,
             entries: entries as u64,
             entries_written: 0,
-            block_builder: BlockBuilder::new(),
+            block_builder: BlockBuilder::new(
+                config.block_target_size,
+                config.block_restart_interval,
+            ),
             index_builder: IndexBuilder::new(),
-            bloom_builder: BloomFilterBuilder::new(entries, FALSE_POSITIVE_RATE),
+            bloom_builder: BloomFilterBuilder::new(entries, config.bloom_false_positive_rate),
             last_key: None,
+            config,
             _marker: PhantomData,
         }
     }
@@ -94,7 +98,14 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         let Some(last_key) = self.last_key.take() else {
             return Ok(());
         };
-        let block = std::mem::replace(&mut self.block_builder, BlockBuilder::new()).finalize();
+        let block = std::mem::replace(
+            &mut self.block_builder,
+            BlockBuilder::new(
+                self.config.block_target_size,
+                self.config.block_restart_interval,
+            ),
+        )
+        .finalize();
         let block_offset = self.filepos;
         let block_size = block.len() as u32;
 
@@ -130,7 +141,7 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
 
         // write footer
         let footer = SstFooter {
-            magic: *SST_MAGICNUM,
+            magic: *SILO_SST_MAGICNUM,
             bloom_offset: bloom_offset.into(),
             bloom_size: bloom_size.into(),
             bloom_footer: bloom.footer(),

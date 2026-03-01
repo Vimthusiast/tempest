@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate tracing;
 
-use tempest::{Tempest, base::TempestResult, fio::UringFileSystem};
+use tempest::{Tempest, base::TempestResult, fio::UringFileSystem, silo::config::SiloConfig};
 
 use tracing_subscriber::EnvFilter;
 
@@ -15,7 +15,9 @@ async fn main() -> TempestResult<()> {
     let fs = UringFileSystem;
     let root_dir = "./data";
 
-    Tempest::new(fs, root_dir).start().await?;
+    Tempest::new(fs, root_dir, SiloConfig::default())
+        .start()
+        .await?;
 
     info!("exited");
     tokio::signal::ctrl_c().await?;

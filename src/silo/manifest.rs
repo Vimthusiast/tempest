@@ -17,10 +17,8 @@ use crate::{
         bincode_options,
     },
     fio::{FioFS, FioFile},
+    silo::config::ManifestConfig,
 };
-
-const SEQNUM_LIMIT_STEP: u64 = 1000;
-const FILENUM_LIMIT_STEP: u64 = 100;
 
 pub(super) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64) -> PathBuf {
     silo_root
@@ -258,14 +256,6 @@ pub(super) struct ManifestResponse {
     pub filenum_range: std::ops::Range<u64>,
 }
 
-/// The ratio between the current file size and the baseline snapshot size
-/// that triggers a rotation of the manifest file.
-const SILO_MANIFEST_GROWTH_FACTOR: u64 = 2;
-
-/// The minimum file size required before growth.
-/// The growth factor does not matter when below this baseline.
-const SILO_MANIFEST_GROWTH_BASELINE: u64 = 8 * 1024 * 1024; // 8 MiB
-
 /// Manages reads and writes to the manifest of a silo.
 #[derive(Debug)]
 pub(super) struct SiloManifest<F: FioFS> {
@@ -307,11 +297,17 @@ pub(super) struct SiloManifest<F: FioFS> {
     ///
     /// [`shutdown`]: Self::shutdown
     is_shutdown: bool,
+
+    config: ManifestConfig,
 }
 
 impl<F: FioFS> SiloManifest<F> {
     #[instrument(skip_all, level = "info")]
-    pub(super) async fn init(fs: F, silo_root: PathBuf) -> TempestResult<Self> {
+    pub(super) async fn init(
+        fs: F,
+        silo_root: PathBuf,
+        config: ManifestConfig,
+    ) -> TempestResult<Self> {
         info!("initializing silo manifest at {:?}", silo_root);
         let manifest_dir = silo_root.join("manifest");
         fs.create_dir_all(&manifest_dir).await?;
@@ -452,6 +448,8 @@ impl<F: FioFS> SiloManifest<F> {
                     ssts,
 
                     is_shutdown: false,
+
+                    config,
                 };
 
                 if had_error {
@@ -485,7 +483,7 @@ impl<F: FioFS> SiloManifest<F> {
         let scratch = BytesMut::with_capacity(4096);
 
         // create initial edit
-        let filenum_limit = filenum + FILENUM_LIMIT_STEP;
+        let filenum_limit = filenum + config.filenum_limit_step;
         let initial_edit = ManifestEdit::V1(ManifestEditV1 {
             filenum_limit: Some(filenum_limit),
             seqnum_limit: None,
@@ -521,6 +519,8 @@ impl<F: FioFS> SiloManifest<F> {
             ssts: Vec::new(),
 
             is_shutdown: false,
+
+            config,
         })
     }
 
@@ -770,7 +770,7 @@ impl<F: FioFS> SiloManifest<F> {
 
         let range = start..end;
         if end > self.filenum_limit {
-            let new_limit = end + FILENUM_LIMIT_STEP;
+            let new_limit = end + self.config.filenum_limit_step;
             Ok((range, Some(new_limit)))
         } else {
             Ok((range, None))
@@ -793,7 +793,7 @@ impl<F: FioFS> SiloManifest<F> {
         let range = start..end;
 
         if end > self.seqnum_limit {
-            let raw_limit = end.get() + SEQNUM_LIMIT_STEP;
+            let raw_limit = end.get() + self.config.seqnum_limit_step;
             let new_limit = SeqNum::try_from(std::cmp::min(raw_limit, SeqNum::MAX.get()))
                 .expect("handled by cmp::min");
             Ok((range, Some(new_limit)))
@@ -825,8 +825,8 @@ impl<F: FioFS> SiloManifest<F> {
 
     async fn maybe_rotate(&mut self) -> TempestResult<()> {
         let threshold = std::cmp::max(
-            self.initial_file_size * SILO_MANIFEST_GROWTH_FACTOR,
-            SILO_MANIFEST_GROWTH_BASELINE,
+            self.initial_file_size * self.config.growth_factor,
+            self.config.growth_baseline,
         );
 
         if self.filepos > threshold {
@@ -940,7 +940,7 @@ impl<F: FioFS> SiloManifest<F> {
 mod tests {
     use tracing::Level;
 
-    use crate::{fio::VirtualFileSystem, tests::setup_tracing};
+    use crate::{fio::VirtualFileSystem, silo::config::SiloConfig, tests::setup_tracing};
 
     use super::*;
 
@@ -977,8 +977,11 @@ mod tests {
             let first_seqnum_range;
             let second_seqnum_range;
 
+            let config = SiloConfig::for_testing().manifest;
+
             {
-                let mut manifest = SiloManifest::init(fs.clone(), silo_root.clone()).await?;
+                let mut manifest =
+                    SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
                 let seqnums_needed = 10;
                 let response = manifest
                     .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
@@ -995,9 +998,10 @@ mod tests {
             }
 
             {
-                let mut manifest = SiloManifest::init(fs.clone(), silo_root.clone()).await?;
-                // simulate big seqnum request
-                let seqnums_needed = SEQNUM_LIMIT_STEP * 3 / 2 + 10;
+                let mut manifest =
+                    SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                // simulate big seqnum request (about 1.5x the limit step)
+                let seqnums_needed = config.seqnum_limit_step * 3 / 2 + 10;
                 let resp = manifest
                     .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
                     .await?;

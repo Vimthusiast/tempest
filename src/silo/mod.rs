@@ -19,6 +19,7 @@ use crate::{
     fio::FioFS,
     silo::{
         batch::WriteBatch,
+        config::SiloConfig,
         iterator::{
             DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry, SyncIterator,
         },
@@ -35,16 +36,12 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{Level, instrument};
 
 pub mod batch;
+pub mod config;
 pub mod iterator;
 pub mod manifest;
 pub mod memtable;
 pub mod sst;
 pub mod wal;
-
-/// Determines the size threshold for flushing a memtable
-pub const MEMTABLE_SIZE_THRESHOLD: usize = 512;
-/// Established back pressure by stalling writes if too many pile up
-pub const MAX_IMMUTABLE_COUNT: usize = 4;
 
 #[derive(Debug)]
 pub struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
@@ -70,6 +67,8 @@ pub struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
     ///
     /// [`shutdown`]: Self::shutdown
     is_shutdown: bool,
+
+    config: SiloConfig,
 }
 
 fn read_varint(src: &[u8]) -> Option<(usize, usize)> {
@@ -77,20 +76,31 @@ fn read_varint(src: &[u8]) -> Option<(usize, usize)> {
 }
 
 impl<F: FioFS, C: Comparer> Silo<F, C> {
-    pub(crate) async fn init(id: u64, fs: F, root_dir: impl Into<PathBuf>) -> TempestResult<Self> {
-        info!("initializing silo");
+    pub(crate) async fn init(
+        id: u64,
+        fs: F,
+        root_dir: impl Into<PathBuf>,
+        config: SiloConfig,
+    ) -> TempestResult<Self> {
+        info!(?config, "initializing silo");
         let root_dir = root_dir.into();
 
         // initialize manifest
-        let mut manifest = SiloManifest::init(fs.clone(), root_dir.clone()).await?;
+        let mut manifest =
+            SiloManifest::init(fs.clone(), root_dir.clone(), config.manifest.clone()).await?;
 
         // allocate filenums for other components
         let filenum_range = manifest.get_filenums(1).await?;
         let mut filenums = filenum_range.into_iter();
 
         // initialize wal
-        let (wal, mut recovery_reader) =
-            SiloWal::init(fs.clone(), root_dir.clone(), filenums.next().unwrap()).await?;
+        let (wal, mut recovery_reader) = SiloWal::init(
+            fs.clone(),
+            root_dir.clone(),
+            filenums.next().unwrap(),
+            config.wal.clone(),
+        )
+        .await?;
 
         // initialize memtables
         let active = MemTable::new();
@@ -109,6 +119,8 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             immutables,
 
             is_shutdown: false,
+
+            config,
         };
 
         while let Some(res) = recovery_reader.next().await {
@@ -219,7 +231,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
     }
 
     fn maybe_freeze(&mut self) {
-        if self.active.approximate_size() >= MEMTABLE_SIZE_THRESHOLD {
+        if self.active.approximate_size() >= self.config.memtable.size_threshold {
             self.freeze_current_memtable();
         }
     }
@@ -271,7 +283,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             .open(&sst_path)
             .await?;
 
-        let mut writer = SstWriter::<_, C>::new(file, entry_count);
+        let mut writer = SstWriter::<_, C>::new(file, entry_count, self.config.sst.clone());
         writer.extend_from_collection(imm.iter()).await?;
         let file_size = writer.finalize().await?;
 
@@ -443,7 +455,12 @@ pub struct SiloWorker<F: FioFS, C: Comparer> {
 
 impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
     /// Creates a silo worker that initializes and manages a [`Silo`] within the `root_dir`.
-    pub fn spawn_worker(id: u64, fs: F, root_dir: impl Into<PathBuf>) -> SiloHandle {
+    pub fn spawn_worker(
+        id: u64,
+        fs: F,
+        root_dir: impl Into<PathBuf>,
+        config: SiloConfig,
+    ) -> SiloHandle {
         let root_dir = root_dir.into();
         let silo_dir = root_dir.join(format!("silo-{}", id));
         let (sender, receiver) = mpsc::channel(1024);
@@ -456,7 +473,7 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
 
             let result = tokio_uring::start(async move {
                 info!(id, "initialized tokio-uring runtime");
-                let silo = Silo::<F, C>::init(id, fs, silo_dir).await?;
+                let silo = Silo::<F, C>::init(id, fs, silo_dir, config).await?;
                 let mut worker = SiloWorker { silo, receiver };
                 worker.start().await;
 
@@ -544,6 +561,7 @@ mod tests {
         let silo_span = span!(Level::INFO, "silo", id);
         let silo_dir = "silo-0";
         let fs = VirtualFileSystem::new();
+        let config = SiloConfig::for_testing();
         if let Err(err) = tokio_uring::start(
             async {
                 let kvs = {
@@ -562,7 +580,7 @@ mod tests {
                 {
                     // initialize silo
                     let mut silo: Silo<_, DefaultComparer> =
-                        Silo::init(id, fs.clone(), silo_dir).await?;
+                        Silo::init(id, fs.clone(), silo_dir, config.clone()).await?;
 
                     // create batched insert
                     let mut batch = WriteBatch::new();
@@ -581,7 +599,7 @@ mod tests {
                 {
                     // initialize silo
                     let mut silo: Silo<_, DefaultComparer> =
-                        Silo::init(id, fs.clone(), silo_dir).await?;
+                        Silo::init(id, fs.clone(), silo_dir, config.clone()).await?;
 
                     // verify that all values were persisted
                     for &(k, v) in &kvs {
@@ -640,11 +658,13 @@ mod tests {
         let fs = VirtualFileSystem::new();
 
         let silo_span = span!(Level::INFO, "silo", id);
+        let config = SiloConfig::for_testing();
         tokio_uring::start(
             async {
                 info!("starting first silo");
                 {
-                    let mut silo: Silo<_> = Silo::init(id, fs.clone(), silo_dir).await?;
+                    let mut silo: Silo<_> =
+                        Silo::init(id, fs.clone(), silo_dir, config.clone()).await?;
 
                     // 1. Write initial data and move to immutables
                     let mut batch1 = WriteBatch::new();
@@ -701,7 +721,8 @@ mod tests {
                 info!("starting second silo");
                 {
                     // re-open and verify the same scan results hold after recovery
-                    let mut silo: Silo<_> = Silo::init(id, fs.clone(), silo_dir).await?;
+                    let mut silo: Silo<_> =
+                        Silo::init(id, fs.clone(), silo_dir, config.clone()).await?;
 
                     let mut scanner = silo.scan().await?;
                     let mut results = Vec::new();
@@ -747,12 +768,19 @@ mod tests {
         let fs = VirtualFileSystem::new();
 
         let silo_span = span!(Level::INFO, "silo", id);
+        let config = SiloConfig::for_testing();
         tokio_uring::start(
             async {
-                let batch_count = MEMTABLE_SIZE_THRESHOLD / 4;
-                let override_wrap = 1024;
+                let mut restart_counter = 0;
+                let mut override_counter = 0;
+
+                // every write is at least 2 bytes, resulting in a flush (thresh * 1/2)
+                let batch_count = config.memtable.size_threshold / 2;
+                let override_wrap = batch_count / 8;
                 let restart_interval = batch_count / 16;
-                let mut silo = Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir).await?;
+                let mut silo =
+                    Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir, config.clone())
+                        .await?;
                 for i in 0..batch_count {
                     info!(i, "writing new batch");
                     let is_first_or_last = i == 0 || i == batch_count;
@@ -767,23 +795,34 @@ mod tests {
                     batch.put(key_b.as_ref(), value_b.as_ref());
 
                     if i % override_wrap == 0 && !is_first_or_last {
+                        override_counter += 1;
                         batch.delete(key_a.as_ref());
                     }
 
                     silo.write(batch).await?;
 
                     if i % restart_interval == 0 && !is_first_or_last {
+                        restart_counter += 1;
                         silo.shutdown().await?;
-                        silo = Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir).await?;
+                        silo = Silo::<_, DefaultComparer>::init(
+                            id,
+                            fs.clone(),
+                            silo_dir,
+                            config.clone(),
+                        )
+                        .await?;
                     }
                     if i % override_wrap == 0 {
                         info!("progress {:.2}%", (i as f64 / batch_count as f64) * 100.0)
                     }
                 }
                 silo.shutdown().await?;
+                info!(restart_counter, override_counter, "finished write loop");
 
                 // reopen and verify final state
-                let mut silo = Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir).await?;
+                let mut silo =
+                    Silo::<_, DefaultComparer>::init(id, fs.clone(), silo_dir, config.clone())
+                        .await?;
                 let snapshot = silo.highest_seqnum();
 
                 for i in 0..batch_count {

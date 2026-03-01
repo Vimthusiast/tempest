@@ -5,7 +5,7 @@ use futures::FutureExt;
 use crate::{
     base::{DefaultComparer, TempestResult},
     fio::FioFS,
-    silo::{SiloHandle, SiloWorker, batch::WriteBatch},
+    silo::{SiloHandle, SiloWorker, batch::WriteBatch, config::SiloConfig},
 };
 
 #[macro_use]
@@ -21,18 +21,20 @@ pub mod silo;
 
 pub struct Tempest<F: FioFS> {
     silo_handles: Vec<(u64, SiloHandle)>,
+    silo_config: SiloConfig,
 
     root_dir: PathBuf,
     fs: F,
 }
 
 impl<F: FioFS> Tempest<F> {
-    pub fn new(fs: F, root_dir: impl Into<PathBuf>) -> Self {
+    pub fn new(fs: F, root_dir: impl Into<PathBuf>, silo_config: SiloConfig) -> Self {
         let root_dir = root_dir.into();
 
         info!("creating new tempest instance");
         Self {
             silo_handles: Vec::new(),
+            silo_config,
 
             root_dir: root_dir.into(),
             fs,
@@ -45,8 +47,12 @@ impl<F: FioFS> Tempest<F> {
         info!(num_workers, "starting Tempest");
 
         for id in 0..num_workers {
-            let handle =
-                SiloWorker::<F, DefaultComparer>::spawn_worker(id, self.fs.clone(), &self.root_dir);
+            let handle = SiloWorker::<F, DefaultComparer>::spawn_worker(
+                id,
+                self.fs.clone(),
+                &self.root_dir,
+                self.silo_config.clone(),
+            );
             self.silo_handles.push((id, handle));
         }
 

@@ -13,6 +13,7 @@ use tracing::{Instrument, Level};
 use crate::{
     base::{ByteSize, HexU64, SILO_WAL_MAGICNUM, TempestError, TempestResult},
     fio::{FioFS, FioFile},
+    silo::config::WalConfig,
 };
 
 #[derive(Debug)]
@@ -363,20 +364,21 @@ pub struct SiloWal<F: FioFS> {
     current_file: <F as FioFS>::File,
     filepos: u64,
     record_count: u32,
+
+    config: WalConfig,
 }
 
 // -- constants --
 pub const SILO_WAL_DIR_NAME: &str = "wal";
 pub const SILO_WAL_HEADER_SIZE: usize = 16;
 pub const SILO_WAL_RECORD_PREFIX_SIZE: usize = 12;
-pub const SILO_WAL_FILE_ROTATE_FILE_SIZE_THRESHOLD: u64 = 2 * 1024 * 1024 * 1024;
-pub const SILO_WAL_FILE_ROTATE_RECORD_COUNT_THRESHOLD: u32 = 10_000;
 
 impl<F: FioFS> SiloWal<F> {
     pub(crate) async fn init(
         fs: F,
         silo_dir: PathBuf,
         filenum: u64,
+        config: WalConfig,
     ) -> TempestResult<(Self, WalRecoveryReader<F>)> {
         let wal_dir = silo_dir.join(SILO_WAL_DIR_NAME);
         info!("initializing silo write-ahead log at {:?}", wal_dir);
@@ -415,6 +417,8 @@ impl<F: FioFS> SiloWal<F> {
             current_file,
             filepos: SILO_WAL_HEADER_SIZE as u64,
             record_count: 0,
+
+            config,
         };
 
         info!("finished initializing write-ahead log");
@@ -422,8 +426,8 @@ impl<F: FioFS> SiloWal<F> {
     }
 
     const fn get_status(&self) -> WalStatus {
-        let needs_rotation = self.filepos > SILO_WAL_FILE_ROTATE_FILE_SIZE_THRESHOLD
-            || self.record_count > SILO_WAL_FILE_ROTATE_RECORD_COUNT_THRESHOLD;
+        let needs_rotation = self.filepos > self.config.rotate_file_size_threshold
+            || self.record_count > self.config.rotate_record_count_threshold;
         if needs_rotation {
             WalStatus::NeedsRotation
         } else {
@@ -500,6 +504,7 @@ mod tests {
     use super::*;
     use crate::{
         fio::VirtualFileSystem,
+        silo::config::SiloConfig,
         tests::{filenum_gen, setup_tracing},
     };
 
@@ -512,16 +517,17 @@ mod tests {
         let mut next_filenum = filenum_gen();
         let data = Bytes::from_static(b"some-test-data");
 
+        let config = SiloConfig::for_testing().wal;
         {
             let (mut wal, mut recovery_reader) =
-                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum()).await?;
+                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum(), config.clone()).await?;
             let _ = wal.append(data.clone()).await?;
             assert!(recovery_reader.next().await.is_none());
         }
 
         {
             let (_, mut recovery_reader) =
-                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum()).await?;
+                SiloWal::init(fs.clone(), silo_dir.clone(), next_filenum(), config.clone()).await?;
             assert_eq!(recovery_reader.next().await.unwrap().unwrap(), data);
             assert!(recovery_reader.next().await.is_none());
         }
