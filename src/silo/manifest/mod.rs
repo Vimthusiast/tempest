@@ -5,20 +5,24 @@ use std::{
 };
 
 use bincode::Options as BincodeOptions;
-use bytes::{BufMut, Bytes, BytesMut};
-use crc64::crc64;
+use bytes::{BufMut, BytesMut};
 use futures::{FutureExt, StreamExt, TryStreamExt};
-use serde::{Deserialize, Serialize};
 use tokio_uring::buf::BoundedBuf;
 
 use crate::{
-    base::{
-        ByteSize, HexU64, SILO_MANIFEST_MAGICNUM, SeqNum, TempestError, TempestResult,
-        bincode_options,
-    },
+    base::{ByteSize, HexU64, SeqNum, TempestError, TempestResult, bincode_options},
     fio::{FioFS, FioFile},
-    silo::config::ManifestConfig,
+    silo::{
+        config::ManifestConfig,
+    },
 };
+
+
+mod format;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use format::*;
 
 pub(super) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64) -> PathBuf {
     silo_root
@@ -28,199 +32,12 @@ pub(super) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64)
         .join(format!("{}.sst", filenum))
 }
 
-/// # SST Metadata
-///
-/// Stores the metadata for one sorted string table within Tempest.
-/// The path format is **`/{silo_root}/ssts/l-{level}/{filenum}.sst`**,
-/// which can be obtained simply through the [`get_path`] method.
-///
-/// [`get_path`]: Self::get_path
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct SstMetadata {
-    pub(super) filenum: u64,
-    pub(super) file_size: u64,
-
-    pub(super) level: u8,
-
-    pub(super) min_key: Bytes,
-    pub(super) max_key: Bytes,
-
-    pub(super) min_seqnum: SeqNum,
-    pub(super) max_seqnum: SeqNum,
-}
-
-impl SstMetadata {
-    /// Returns the file system path for the SST this Metadata references.
-    /// The path is returned as within the `ssts` subdirectory of `data`.
-    /// To get the whole path, join these two together.
-    pub fn get_path(&self, silo_root: impl AsRef<Path>) -> PathBuf {
-        get_sst_path(silo_root, self.level, self.filenum)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(super) struct SstDeletion {
-    pub(super) filenum: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[debug("ManifestEditV1(seqnum_limit={} filenum_limit={} ssts_added={} ssts_removed={})",
-    seqnum_limit.map(|v| v.get()).unwrap_or(0),
-    filenum_limit.unwrap_or(0),
-    ssts_added.as_ref().map(|v| v.len()).unwrap_or(0),
-    ssts_removed.as_ref().map(|v| v.len()).unwrap_or(0),
-)]
-pub struct ManifestEditV1 {
-    seqnum_limit: Option<SeqNum>,
-    filenum_limit: Option<u64>,
-
-    /// A list of new [`SstMetadata`] objects that register SST files to the [`SiloManifest`].
-    ssts_added: Option<Vec<SstMetadata>>,
-
-    /// A list of removed [`SstMetadata`] objects, identified by their level and file ID,
-    /// that register SST files to the [`SiloManifest`].
-    ssts_removed: Option<Vec<SstDeletion>>,
-}
-
-/// A versioned list of edits to the [`SiloManifest`].
-#[repr(u16)]
-#[derive(Debug, Serialize, Deserialize)]
-pub enum ManifestEdit {
-    #[debug("{:?}", _0)]
-    V1(ManifestEditV1) = 1,
-}
-
-impl ManifestEdit {
-    fn into_latest(self) -> ManifestEditV1 {
-        match self {
-            ManifestEdit::V1(edit) => edit,
-        }
-    }
-}
-
-/// Total size of a [`SiloManifestHeader`] after encoding.
-const SILO_MANIFEST_HEADER_SIZE: usize = 24;
-
-struct SiloManifestHeader {
-    filenum: u64,
-    filename: PathBuf,
-}
-
-impl SiloManifestHeader {
-    pub fn new(filenum: u64) -> Self {
-        // allocate filename once, to safe on future allocations using `get_filename`
-        let filename = PathBuf::from(format!("MANIFEST-{}", filenum));
-        Self { filenum, filename }
-    }
-
-    #[inline]
-    pub const fn filenum(&self) -> u64 {
-        self.filenum
-    }
-
-    #[inline]
-    pub fn get_filename(&self) -> &Path {
-        &self.filename
-    }
-
-    pub fn encode(&self) -> [u8; SILO_MANIFEST_HEADER_SIZE] {
-        let mut buf = [0u8; SILO_MANIFEST_HEADER_SIZE];
-        // 1. Magic bytes
-        buf[0..8].copy_from_slice(SILO_MANIFEST_MAGICNUM);
-
-        // 2. Manifest ID / file number (little-endian)
-        buf[8..16].copy_from_slice(&self.filenum.to_le_bytes());
-
-        // 3. Calculate and store CRC64 checksum
-        let bytes_to_hash = &buf[0..16];
-        let checksum = crc64(0, bytes_to_hash);
-        buf[16..24].copy_from_slice(&checksum.to_le_bytes());
-        buf
-    }
-
-    pub fn decode(buf: &[u8; SILO_MANIFEST_HEADER_SIZE]) -> io::Result<Self> {
-        let magic_bytes = &buf[0..8];
-        if magic_bytes != SILO_MANIFEST_MAGICNUM {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "invalid magic number: not a manifest file. expected {:?} but got {:?}.",
-                    SILO_MANIFEST_MAGICNUM, magic_bytes
-                ),
-            ));
-        }
-
-        let checksum_bytes = buf[16..24].try_into().expect("16..24 is 8 long");
-        let checksum = u64::from_le_bytes(checksum_bytes);
-        let computed_checksum = crc64(0, &buf[0..16]);
-        if computed_checksum != checksum {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "manifest header checksum mismatch: potential corruption",
-            ));
-        }
-
-        let file_number_bytes = buf[8..16].try_into().expect("8..16 is 8 long");
-        let file_number = u64::from_le_bytes(file_number_bytes);
-        Ok(Self::new(file_number))
-    }
-}
-
-/// Total size of a record prefix in a silo manifest.
-const SILO_MANIFEST_RECORD_PREFIX_SIZE: usize = 12;
-
-struct SiloManifestRecordPrefix {
-    data_len: u32,
-    checksum: u64,
-}
-
-impl SiloManifestRecordPrefix {
-    /// Creates a new record prefix for some data, providing a frame with a checksum.
-    fn new(data: &[u8]) -> Self {
-        assert!(
-            data.len() <= u32::MAX as usize,
-            "manifest record size may not exceed 2^32 bytes."
-        );
-        let data_len = data.len() as u32;
-        let checksum = crc64(0, data);
-        Self { data_len, checksum }
-    }
-
-    /// Calculates the checksum of `data` and compares it with the stored checksum.
-    /// The length of `data` must equal the stored `data_len`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `data.len()` is different from `self.data_len`.
-    #[inline]
-    fn is_valid_record(&self, data: &[u8]) -> bool {
-        assert_eq!(data.len(), self.data_len as usize);
-        let computed_checksum = crc64(0, data);
-        self.checksum == computed_checksum
-    }
-
-    /// Encodes this record prefix into bytes.
-    #[inline]
-    fn encode(&self) -> [u8; SILO_MANIFEST_RECORD_PREFIX_SIZE] {
-        let mut buf = [0u8; SILO_MANIFEST_RECORD_PREFIX_SIZE];
-        buf[0..4].copy_from_slice(&self.data_len.to_le_bytes());
-        buf[4..12].copy_from_slice(&self.checksum.to_le_bytes());
-        buf
-    }
-
-    /// Decodes this record prefix from a byte slice.
-    #[inline]
-    fn decode(buf: &[u8; SILO_MANIFEST_RECORD_PREFIX_SIZE]) -> Self {
-        let data_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        let checksum = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-        Self { data_len, checksum }
-    }
-}
-
 #[derive(Debug, Default)]
 pub(super) struct ManifestRequest {
     pub ssts_added: Vec<SstMetadata>,
     pub ssts_removed: Vec<SstDeletion>,
+    pub wal_filenums_added: Vec<u64>,
+    pub wal_filenums_removed: Vec<u64>,
     pub seqnums_needed: u64,
     pub filenums_needed: u64,
 }
@@ -237,6 +54,16 @@ impl ManifestRequest {
 
     pub fn with_ssts_removed(mut self, ssts: impl IntoIterator<Item = SstDeletion>) -> Self {
         self.ssts_removed.extend(ssts);
+        self
+    }
+
+    pub fn with_wal_filenums_added(mut self, ssts: impl IntoIterator<Item = u64>) -> Self {
+        self.wal_filenums_added.extend(ssts);
+        self
+    }
+
+    pub fn with_wal_filenums_removed(mut self, ssts: impl IntoIterator<Item = u64>) -> Self {
+        self.wal_filenums_removed.extend(ssts);
         self
     }
 
@@ -292,6 +119,8 @@ pub(super) struct SiloManifest<F: FioFS> {
 
     /// List of sorted string tables in this silo.
     ssts: Vec<SstMetadata>,
+    /// List of write-ahead logs in this silo
+    wal_filenums: Vec<u64>,
 
     /// This is `true`, when [`shutdown`] was called.
     ///
@@ -339,9 +168,7 @@ impl<F: FioFS> SiloManifest<F> {
                         };
 
                         let buf = BytesMut::zeroed(SILO_MANIFEST_HEADER_SIZE);
-                        let (res, sliced_buf) = file
-                            .read_exact_at(buf.slice(..SILO_MANIFEST_HEADER_SIZE), 0)
-                            .await;
+                        let (res, sliced_buf) = file.read_exact_at(buf.slice(..), 0).await;
                         let buf = sliced_buf.into_inner();
                         if let Err(e) = res {
                             warn!("could not read header for file {:?}", path);
@@ -349,9 +176,7 @@ impl<F: FioFS> SiloManifest<F> {
                         }
 
                         // decode header
-                        let header = match SiloManifestHeader::decode(
-                            buf[..SILO_MANIFEST_HEADER_SIZE].try_into().unwrap(),
-                        ) {
+                        let header = match SiloManifestHeader::decode(buf[..].try_into().unwrap()) {
                             Ok(h) => h,
                             Err(e) => {
                                 warn!("could not decode header for file {:?}", path);
@@ -380,6 +205,7 @@ impl<F: FioFS> SiloManifest<F> {
                 let mut seqnum_limit = SeqNum::START;
                 let mut filenum_limit = highest_filenum;
                 let mut ssts: Vec<SstMetadata> = Vec::new();
+                let mut wal_filenums: Vec<u64> = Vec::new();
 
                 debug!(
                     highest_filenum, size=?ByteSize(size), ?path,
@@ -411,19 +237,29 @@ impl<F: FioFS> SiloManifest<F> {
                         filenum_limit = fl;
                     }
 
+                    if let Some(added) = edit.ssts_added {
+                        ssts.extend(added);
+                    }
+
                     if let Some(removed) = edit.ssts_removed {
                         let ids: HashSet<_> = removed.into_iter().map(|r| r.filenum).collect();
                         ssts.retain(|s| !ids.contains(&s.filenum));
                     }
 
-                    if let Some(added) = edit.ssts_added {
-                        ssts.extend(added);
+                    if let Some(added) = edit.wal_filenums_added {
+                        wal_filenums.extend(added);
+                    }
+
+                    if let Some(removed) = edit.wal_filenums_removed {
+                        let ids: HashSet<_> = removed.into_iter().collect();
+                        wal_filenums.retain(|n| !ids.contains(n));
                     }
                 }
                 info!(
                     seqnum_limit = seqnum_limit.get(),
                     filenum_limit,
                     ssts = ssts.len(),
+                    wal_filenums = wal_filenums.len(),
                     "finished reading in manifest file",
                 );
 
@@ -446,6 +282,7 @@ impl<F: FioFS> SiloManifest<F> {
                     filenum_limit,
 
                     ssts,
+                    wal_filenums,
 
                     is_shutdown: false,
 
@@ -486,9 +323,7 @@ impl<F: FioFS> SiloManifest<F> {
         let filenum_limit = filenum + config.filenum_limit_step;
         let initial_edit = ManifestEdit::V1(ManifestEditV1 {
             filenum_limit: Some(filenum_limit),
-            seqnum_limit: None,
-            ssts_added: None,
-            ssts_removed: None,
+            ..Default::default()
         });
         let (res, scratch) = Self::write_to_file(&file, scratch, filenum, &initial_edit).await;
         let filepos = res?;
@@ -517,6 +352,7 @@ impl<F: FioFS> SiloManifest<F> {
             filenum_limit,
 
             ssts: Vec::new(),
+            wal_filenums: Vec::new(),
 
             is_shutdown: false,
 
@@ -531,8 +367,7 @@ impl<F: FioFS> SiloManifest<F> {
         let final_edit = ManifestEdit::V1(ManifestEditV1 {
             seqnum_limit: Some(self.seqnum_current),
             filenum_limit: Some(self.filenum_current),
-            ssts_added: None,
-            ssts_removed: None,
+            ..Default::default()
         });
 
         // write the final edit
@@ -581,7 +416,8 @@ impl<F: FioFS> SiloManifest<F> {
             // PERF: manifest edits with lifetime, to borrow instead of clone here
             // -> Cow for owned manifest edits? -> zero-copy?
             ssts_added: Some(self.ssts.clone()),
-            ssts_removed: None,
+            wal_filenums_added: Some(self.wal_filenums.clone()),
+            ..Default::default()
         });
 
         let (res, scratch) = Self::write_to_file(&file, scratch, filenum, &initial_edit).await;
@@ -813,13 +649,22 @@ impl<F: FioFS> SiloManifest<F> {
             self.filenum_limit = fl;
         }
 
+        if let Some(added) = edit.ssts_added {
+            self.ssts.extend(added);
+        }
+
         if let Some(removed) = edit.ssts_removed {
             let ids: HashSet<_> = removed.into_iter().map(|r| r.filenum).collect();
             self.ssts.retain(|s| !ids.contains(&s.filenum));
         }
 
-        if let Some(added) = edit.ssts_added {
-            self.ssts.extend(added);
+        if let Some(added) = edit.wal_filenums_added {
+            self.wal_filenums.extend(added);
+        }
+
+        if let Some(removed) = edit.wal_filenums_removed {
+            let ids: HashSet<_> = removed.into_iter().collect();
+            self.wal_filenums.retain(|n| !ids.contains(n));
         }
     }
 
@@ -843,12 +688,7 @@ impl<F: FioFS> SiloManifest<F> {
         req: ManifestRequest,
     ) -> TempestResult<ManifestResponse> {
         let mut requires_write = false;
-        let mut edit = ManifestEditV1 {
-            seqnum_limit: None,
-            filenum_limit: None,
-            ssts_added: None,
-            ssts_removed: None,
-        };
+        let mut edit = ManifestEditV1::default();
 
         if !req.ssts_added.is_empty() {
             edit.ssts_added = Some(req.ssts_added);
@@ -857,6 +697,16 @@ impl<F: FioFS> SiloManifest<F> {
 
         if !req.ssts_removed.is_empty() {
             edit.ssts_removed = Some(req.ssts_removed);
+            requires_write = true;
+        }
+
+        if !req.wal_filenums_added.is_empty() {
+            edit.wal_filenums_added = Some(req.wal_filenums_added);
+            requires_write = true;
+        }
+
+        if !req.wal_filenums_removed.is_empty() {
+            edit.wal_filenums_removed = Some(req.wal_filenums_removed);
             requires_write = true;
         }
 
@@ -934,96 +784,16 @@ impl<F: FioFS> SiloManifest<F> {
     pub(super) fn ssts(&self) -> &[SstMetadata] {
         &self.ssts
     }
+
+    pub(super) fn wal_filenums(&self) -> &[u64] {
+        &self.wal_filenums
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use tracing::Level;
-
-    use crate::{fio::VirtualFileSystem, silo::config::SiloConfig, tests::setup_tracing};
-
-    use super::*;
-
-    #[test]
-    fn test_header_encode_decode() {
-        let filenum = 42;
-        let header = SiloManifestHeader::new(filenum);
-        let encoded = header.encode();
-        assert_eq!(encoded.len(), SILO_MANIFEST_HEADER_SIZE);
-        let decoded = SiloManifestHeader::decode(&encoded).unwrap();
-        assert_eq!(decoded.filenum, filenum);
-    }
-
-    #[test]
-    fn test_record_prefix_encode_decode() {
-        let data = b"some-garbage-data".as_ref();
-        let record = SiloManifestRecordPrefix::new(data);
-        let encoded = record.encode();
-        assert_eq!(encoded.len(), SILO_MANIFEST_RECORD_PREFIX_SIZE);
-        let decoded = SiloManifestRecordPrefix::decode(&encoded);
-        assert!(decoded.is_valid_record(data));
-    }
-
-    #[test]
-    fn test_manifest() {
-        setup_tracing();
-        tokio_uring::start(async {
-            let silo_span = span!(Level::INFO, "silo", id = 0);
-            let _enter = silo_span.enter();
-
-            let fs = VirtualFileSystem::new();
-            let silo_root = PathBuf::from("silo-0");
-
-            let first_seqnum_range;
-            let second_seqnum_range;
-
-            let config = SiloConfig::for_testing().manifest;
-
-            {
-                let mut manifest =
-                    SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
-                let seqnums_needed = 10;
-                let response = manifest
-                    .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
-                    .await?;
-                first_seqnum_range = response.seqnum_range;
-                manifest.shutdown().await?;
-                info!("first manifest final state: {:#?}", manifest);
-                let range_size = first_seqnum_range.end.get() - first_seqnum_range.start.get();
-                assert_eq!(
-                    range_size, seqnums_needed,
-                    "requested {} seqnums, but got {}",
-                    seqnums_needed, range_size,
-                );
-            }
-
-            {
-                let mut manifest =
-                    SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
-                // simulate big seqnum request (about 1.5x the limit step)
-                let seqnums_needed = config.seqnum_limit_step * 3 / 2 + 10;
-                let resp = manifest
-                    .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
-                    .await?;
-                second_seqnum_range = resp.seqnum_range;
-                manifest.shutdown().await?;
-                info!("second manifest final state: {:#?}", manifest);
-                let range_size = second_seqnum_range.end.get() - second_seqnum_range.start.get();
-                assert_eq!(
-                    range_size, seqnums_needed,
-                    "requested {} seqnums, but got {}",
-                    seqnums_needed, range_size,
-                );
-            }
-
-            assert_eq!(
-                first_seqnum_range.end, second_seqnum_range.start,
-                "seqnum ranges should be continuous, got {:?} and {:?}",
-                first_seqnum_range, second_seqnum_range,
-            );
-
-            Ok::<(), TempestError>(())
-        })
-        .unwrap();
+impl<F: FioFS> Drop for SiloManifest<F> {
+    fn drop(&mut self) {
+        if !self.is_shutdown {
+            error!("silo manifest was not shut down correctly");
+        }
     }
 }
