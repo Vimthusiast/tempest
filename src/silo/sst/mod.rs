@@ -28,24 +28,19 @@ mod tests {
     use crate::fio::{FioFS, FioFile, VirtualFile, VirtualFileSystem};
     use crate::silo::config::SiloConfig;
     use crate::silo::iterator::TempestIterator;
+    use crate::tests::setup_tracing;
     use bytes::Bytes;
 
     fn make_trailer(seqnum: u64, kind: KeyKind) -> KeyTrailer {
         KeyTrailer::new(unsafe { SeqNum::new_unchecked(seqnum) }, kind)
     }
 
-    fn make_key(s: &str, seqnum: u64) -> InternalKey<DefaultComparer> {
-        InternalKey::new(
-            Bytes::copy_from_slice(s.as_bytes()),
-            make_trailer(seqnum, KeyKind::Put),
-        )
+    fn make_key(s: &str, seqnum: u64) -> InternalKey<DefaultComparer, &[u8]> {
+        InternalKey::new(s.as_ref(), make_trailer(seqnum, KeyKind::Put))
     }
 
-    fn make_delete_key(s: &str, seqnum: u64) -> InternalKey<DefaultComparer> {
-        InternalKey::new(
-            Bytes::copy_from_slice(s.as_bytes()),
-            make_trailer(seqnum, KeyKind::Delete),
-        )
+    fn make_delete_key(s: &str, seqnum: u64) -> InternalKey<DefaultComparer, &[u8]> {
+        InternalKey::new(s.as_ref(), make_trailer(seqnum, KeyKind::Delete))
     }
 
     async fn build_sst(entries: &[(&str, u64, &str)]) -> (VirtualFileSystem, String) {
@@ -62,7 +57,10 @@ mod tests {
         let config = SiloConfig::for_testing().sst;
         let mut writer = SstWriter::<_, DefaultComparer>::new(file, entries.len(), config);
         for (key, seqnum, value) in entries {
-            let k = make_key(key, *seqnum);
+            let k = InternalKey::new(
+                Bytes::from(key.to_string()),
+                KeyTrailer::new((*seqnum).try_into().unwrap(), KeyKind::Put),
+            );
             let v = Bytes::copy_from_slice(value.as_bytes());
             writer.write_entry(&k, &v).await.unwrap();
         }
@@ -223,6 +221,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_tombstone_key() {
+        setup_tracing();
+
         let fs = VirtualFileSystem::new();
         let path = "test.sst";
         let file = fs
@@ -238,11 +238,11 @@ mod tests {
         // tombstone - delete marker with higher seqnum
         // NB: higher seqnum comes first!
         writer
-            .write_entry(&make_delete_key("apple", 2), &Bytes::new())
+            .write_entry(&make_delete_key("apple", 2).byte_key(), &Bytes::new())
             .await
             .unwrap();
         writer
-            .write_entry(&make_key("apple", 1), &Bytes::from("fruit"))
+            .write_entry(&make_key("apple", 1).byte_key(), &Bytes::from("fruit"))
             .await
             .unwrap();
         writer.finalize().await.unwrap();
@@ -252,14 +252,8 @@ mod tests {
             .await
             .unwrap();
 
-        // both seqnums should be found since the SST stores all versions
-        assert!(
-            reader
-                .get(&make_delete_key("apple", 2))
-                .await
-                .unwrap()
-                .is_some()
-        );
+        // for point lookups, the SST respects tombstones, so with seqnum=2, it will return None
+        assert!(reader.get(&make_key("apple", 2)).await.unwrap().is_none());
         assert!(reader.get(&make_key("apple", 1)).await.unwrap().is_some());
     }
 
@@ -344,7 +338,7 @@ mod tests {
         while let Ok(Some(())) = iter.next().await {
             let key = iter.key().unwrap().clone();
             let iter_value = iter.value().unwrap().clone();
-            let get_value = reader.get(&key).await.unwrap();
+            let get_value = reader.get(&key.slice_key()).await.unwrap();
             assert_eq!(Some(iter_value), get_value);
         }
     }
@@ -375,11 +369,11 @@ mod tests {
         let config = SiloConfig::for_testing().sst;
         let mut writer = SstWriter::<_, DefaultComparer>::new(file, 2, config);
         writer
-            .write_entry(&make_delete_key("apple", 2), &Bytes::new())
+            .write_entry(&make_delete_key("apple", 2).byte_key(), &Bytes::new())
             .await
             .unwrap();
         writer
-            .write_entry(&make_key("apple", 1), &Bytes::from("fruit"))
+            .write_entry(&make_key("apple", 1).byte_key(), &Bytes::from("fruit"))
             .await
             .unwrap();
         writer.finalize().await.unwrap();

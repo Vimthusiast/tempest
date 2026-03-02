@@ -53,7 +53,7 @@ pub fn bincode_options() -> impl BincodeOptions {
 pub struct SeqNum(NonMaxU64);
 
 impl SeqNum {
-    /// The zero seqnum represent the absence of values when we have a seqnum range.
+    /// The zero seqnum represent the absence of any resonable seqnum, used as the lowest bound.
     pub const ZERO: Self = unsafe { Self::new_unchecked(0) };
 
     /// The sequence number one below the start.
@@ -174,7 +174,7 @@ impl KeyTrailer {
 }
 
 #[derive(Debug, Clone)]
-#[debug("InternalKey(key={:?}, seqnum={:?}, kind={:?})", key, trailer.seqnum(), trailer.kind())]
+#[debug("InternalKey(key={:?}, seqnum={:?}, kind={:?})", PrettyBytes(key.as_ref()), trailer.seqnum(), trailer.kind())]
 pub struct InternalKey<C: Comparer = DefaultComparer, K: AsRef<[u8]> = Bytes> {
     key: K,
     trailer: KeyTrailer,
@@ -196,6 +196,23 @@ impl<C: Comparer, K: AsRef<[u8]>> InternalKey<C, K> {
 
     pub(crate) const fn key(&self) -> &K {
         &self.key
+    }
+
+    pub(crate) fn compare_logical(
+        &self,
+        other: &InternalKey<C, impl AsRef<[u8]>>,
+    ) -> cmp::Ordering {
+        C::default().compare_logical(self.key().as_ref(), other.key().as_ref())
+    }
+
+    /// Converts this key to an `InternalKey<C, &[u8]>`, by slicing the key (borrow).
+    pub(crate) fn slice_key(&self) -> InternalKey<C, &[u8]> {
+        InternalKey::new(self.key.as_ref(), self.trailer)
+    }
+
+    /// Converts this key to an `InternalKey<C, Bytes>`, by copying the key (clone).
+    pub(crate) fn byte_key(&self) -> InternalKey<C, Bytes> {
+        InternalKey::new(Bytes::copy_from_slice(self.key.as_ref()), self.trailer)
     }
 }
 

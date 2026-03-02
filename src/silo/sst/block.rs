@@ -1,9 +1,9 @@
-use std::marker::PhantomData;
+use std::{cmp::Ordering, marker::PhantomData};
 
 use bytes::{BufMut, Bytes, BytesMut};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, Ref, U32};
 
-use crate::base::{Comparer, InternalKey, KeyTrailer};
+use crate::base::{ByteSize, Comparer, InternalKey, KeyKind, KeyTrailer};
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
 #[repr(C)]
@@ -50,9 +50,11 @@ impl BlockBuilder {
         }
     }
 
+    #[instrument(skip(self), fields(pos=self.buf.len(), entry_count=self.entry_count))]
     pub fn write_entry(&mut self, key: &Bytes, trailer: KeyTrailer, value: &Bytes) -> BlockStatus {
         let restart_point_reached = self.entry_count % self.restart_interval == 0;
         if restart_point_reached {
+            trace!("reached restart point");
             self.last_key = None;
             self.restart_offsets.push(self.buf.len() as u32);
         }
@@ -206,12 +208,15 @@ impl<C: Comparer> BlockReader<C> {
         }
     }
 
-    pub fn get<K: AsRef<[u8]>>(&self, key: &InternalKey<C, K>) -> Option<Bytes> {
-        // convert this generic key to a borrowed key so we can compare it with ours
-        let key = InternalKey::<C, &[u8]>::new(key.key().as_ref(), key.trailer());
-
+    #[instrument(skip(self), level = "trace")]
+    pub fn get(&self, search_key: &InternalKey<C, &[u8]>) -> Option<Bytes> {
         // parse the block into sections
         let (entries, offsets) = parse_block(&self.buf);
+        trace!(
+            entries_section_size = ?ByteSize(entries.len() as u64),
+            offsets_count = offsets.len(),
+            "parsed block"
+        );
 
         // phase 1: binary search for the right restart interval
         let restart_key = |offset: usize| -> InternalKey<C, &[u8]> {
@@ -223,28 +228,51 @@ impl<C: Comparer> BlockReader<C> {
             let key = &rest[..unshared];
             let trailer_bytes = &rest[unshared..unshared + size_of::<KeyTrailer>()];
             let trailer = KeyTrailer::read_from_bytes(trailer_bytes).unwrap();
-            InternalKey::new(key, trailer)
+            let key = InternalKey::new(key, trailer);
+            trace!(offset, ?key, "parsed restart key");
+            key
         };
 
-        let start_i =
-            match offsets.binary_search_by(|offset| restart_key(offset.get() as usize).cmp(&key)) {
-                // if we found it, we start here (and will get it immediately)
-                Ok(i) => i,
-                // if we did not find it, start searching in the previous restart interval,
-                // but if ends up underflowing, it is outside of this blocks bounds and we return
-                Err(i) => i.checked_sub(1)?,
+        trace!("starting binary search");
+        let start_i = match offsets.binary_search_by(|offset| {
+            let restart_key = restart_key(offset.get() as usize);
+            trace!("binary search: compare logical");
+            let cmp = match restart_key.compare_logical(&search_key) {
+                Ordering::Equal => {
+                    trace!("binary search: logical equal, compare seqnum");
+                    // NB: For binary search with trailer (seqnum->kind)
+                    // tie break, the following rules apply:
+                    // greater -> in range, find start, jump back => Greater
+                    // equal -> top match, found start, return => Equal
+                    // less -> out of range, continue, jump forward => Less
+                    search_key.trailer().cmp(&restart_key.trailer())
+                }
+                other => other,
             };
+            match cmp {
+                Ordering::Less => trace!(?cmp, "binary search: jumping forth"),
+                Ordering::Equal => trace!(?cmp, "binary search: found"),
+                Ordering::Greater => trace!(?cmp, "binary search: jumping back"),
+            }
+            cmp
+        }) {
+            // if we found it, we start here (and will get it immediately)
+            Ok(i) => i,
+            // if we did not find it, start searching in the previous restart interval
+            Err(i) => i.saturating_sub(1),
+        };
 
         let start_offset = offsets[start_i].get() as usize;
-        let end_offset = offsets
-            .get(start_i + 1)
-            .map(|o| o.get() as usize)
-            .unwrap_or(entries.len());
+        // NB: we would search the whole block, but break early if `found_key > search_key`.
+        // This allows us to find keys where the seqnum is older than the search key, and that are
+        // scattered across multiple restart intervals.
+        let end_offset = entries.len();
 
         // phase 2: linearly search through this interval
         let mut pos = start_offset;
         let mut last_key: Vec<u8> = Vec::new();
 
+        trace!("starting linear search");
         while pos < end_offset {
             let (header, _) = Ref::<_, BlockEntryHeader>::from_prefix(&entries[pos..]).unwrap();
             let shared = header.shared_key_len.get() as usize;
@@ -264,13 +292,28 @@ impl<C: Comparer> BlockReader<C> {
 
             // compare with the search key
             let current = InternalKey::<C, &[u8]>::new(&last_key, trailer);
-            match current.cmp(&key) {
-                std::cmp::Ordering::Less => pos += value_len,
-                std::cmp::Ordering::Equal => return Some(self.buf.slice(pos..pos + value_len)),
-                std::cmp::Ordering::Greater => return None,
+            trace!(found=?current, ?search_key, "linear search: compare logical");
+            match current.compare_logical(&search_key) {
+                Ordering::Less => pos += value_len,
+                Ordering::Equal => {
+                    // only match if it is within MVCC range
+                    if current.trailer().seqnum() <= search_key.trailer().seqnum() {
+                        if current.trailer().kind() == KeyKind::Delete {
+                            trace!(pos, "tombstone found");
+                            return None;
+                        } else {
+                            trace!(pos, "key found");
+                            return Some(self.buf.slice(pos..pos + value_len));
+                        }
+                    }
+                    trace!(pos, "value too new, ignoring");
+                    pos += value_len
+                }
+                Ordering::Greater => break,
             }
         }
 
+        trace!("key not found during linear search");
         None
     }
 
@@ -285,6 +328,7 @@ mod tests {
     use crate::{
         base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
         silo::config::SiloConfig,
+        tests::setup_tracing,
     };
     use bytes::Bytes;
 
@@ -292,13 +336,11 @@ mod tests {
         KeyTrailer::new(unsafe { SeqNum::new_unchecked(seqnum) }, kind)
     }
 
-    fn make_key(s: &str, seqnum: u64) -> InternalKey<DefaultComparer> {
-        InternalKey::new(
-            Bytes::copy_from_slice(s.as_bytes()),
-            make_trailer(seqnum, KeyKind::Put),
-        )
+    fn make_key(s: &str, seqnum: u64) -> InternalKey<DefaultComparer, &[u8]> {
+        InternalKey::new(s.as_ref(), make_trailer(seqnum, KeyKind::Put))
     }
 
+    #[instrument]
     fn build_block(entries: &[(&str, u64, &str)]) -> Bytes {
         let config = SiloConfig::for_testing().sst;
         let mut builder =
@@ -524,8 +566,102 @@ mod tests {
         let reader = BlockReader::<DefaultComparer>::new(buf.clone());
 
         for (key, value) in BlockIterator::<DefaultComparer>::new(buf) {
-            let found = reader.get(&key);
+            let found = reader.get(&key.slice_key());
             assert_eq!(found.unwrap(), value);
         }
+    }
+
+    #[test]
+    fn test_get_returns_newest_eligible_version() {
+        setup_tracing();
+
+        // three versions of "apple", newest first (as they'd be written to the SST)
+        let buf = build_block(&[
+            ("apple", 5, "v3"),
+            ("apple", 3, "v2"),
+            ("apple", 1, "v1"),
+            ("banana", 2, "yellow"),
+        ]);
+        let reader = BlockReader::<DefaultComparer>::new(buf);
+
+        // searching with seqnum=5 returns v3 (exact match)
+        assert_eq!(
+            reader.get(&make_key("apple", 5)).unwrap(),
+            Bytes::from("v3")
+        );
+        // searching with seqnum=4 returns v2 (newest version <= 4)
+        assert_eq!(
+            reader.get(&make_key("apple", 4)).unwrap(),
+            Bytes::from("v2")
+        );
+        // searching with seqnum=3 returns v2 (exact match)
+        assert_eq!(
+            reader.get(&make_key("apple", 3)).unwrap(),
+            Bytes::from("v2")
+        );
+        // searching with seqnum=2 returns v1 (newest version <= 2)
+        assert_eq!(
+            reader.get(&make_key("apple", 2)).unwrap(),
+            Bytes::from("v1")
+        );
+        // searching with seqnum=1 returns v1 (exact match)
+        assert_eq!(
+            reader.get(&make_key("apple", 1)).unwrap(),
+            Bytes::from("v1")
+        );
+        // searching with seqnum=0 returns None (no version old enough)
+        assert!(reader.get(&make_key("apple", 0)).is_none());
+
+        // neighboring key is unaffected
+        assert_eq!(
+            reader.get(&make_key("banana", 2)).unwrap(),
+            Bytes::from("yellow")
+        );
+    }
+
+    #[test]
+    fn test_get_mvcc_across_restart_boundary() {
+        setup_tracing();
+
+        // force versions of the same key to span a restart boundary
+        let config = SiloConfig::for_testing().sst;
+        let restart_interval = config.block_restart_interval;
+        let mut builder = BlockBuilder::new(config.block_target_size, restart_interval);
+
+        // fill up to just before a restart point with unrelated keys
+        for i in 0..(restart_interval - 2) {
+            let k = Bytes::copy_from_slice(format!("aaa:{:04}", i).as_bytes());
+            let v = Bytes::from("x");
+            builder.write_entry(&k, make_trailer(1, KeyKind::Put), &v);
+        }
+        // now write three versions of "zzz" straddling the restart boundary
+        let k = Bytes::from("zzz");
+        builder.write_entry(&k, make_trailer(5, KeyKind::Put), &Bytes::from("new"));
+        builder.write_entry(&k, make_trailer(3, KeyKind::Put), &Bytes::from("mid"));
+        builder.write_entry(&k, make_trailer(1, KeyKind::Put), &Bytes::from("old"));
+        let buf = builder.finalize().freeze();
+
+        let reader = BlockReader::<DefaultComparer>::new(buf);
+        // seqnum=5 exact
+        assert_eq!(reader.get(&make_key("zzz", 5)).unwrap(), Bytes::from("new"));
+        // seqnum=4 will find seqnum=3 (newest at that timestamp)
+        assert_eq!(reader.get(&make_key("zzz", 4)).unwrap(), Bytes::from("mid"));
+        // seqnum=3 exact
+        assert_eq!(reader.get(&make_key("zzz", 3)).unwrap(), Bytes::from("mid"));
+        // seqnum=2 will find seqnum=1 (newest at that timestamp), but has to travel one interval
+        assert_eq!(reader.get(&make_key("zzz", 2)).unwrap(), Bytes::from("old"));
+        // seqnum=1 exact
+        assert_eq!(reader.get(&make_key("zzz", 1)).unwrap(), Bytes::from("old"));
+        // seqnum=0 - no eligible version
+        assert!(reader.get(&make_key("zzz", 0)).is_none());
+    }
+
+    #[test]
+    fn test_get_does_not_bleed_into_next_user_key() {
+        // searching for a key that doesn't exist shouldn't return a value
+        // from a different user key that happens to have a matching seqnum
+        let buf = build_block(&[("apple", 5, "fruit"), ("cherry", 5, "red")]);
+        let reader = BlockReader::<DefaultComparer>::new(buf);
+        assert!(reader.get(&make_key("banana", 5)).is_none());
     }
 }

@@ -23,11 +23,16 @@ pub(super) struct MemTable<C: Comparer> {
     approximate_size: usize,
     min_seqnum: Option<SeqNum>,
     max_seqnum: Option<SeqNum>,
+    /// Represents the smallest filenum of the write-ahead logs that back this memtable.
+    wal_filenum: u64,
 }
 
 impl<C: Comparer> MemTable<C> {
-    pub(super) fn new() -> Self {
-        Default::default()
+    pub(super) fn new(wal_filenum: u64) -> Self {
+        Self {
+            wal_filenum,
+            ..Default::default()
+        }
     }
 
     pub(super) fn insert(&mut self, key: InternalKey<C>, value: Bytes) {
@@ -69,7 +74,7 @@ impl<C: Comparer> MemTable<C> {
         None
     }
 
-    pub(super) fn approximate_size(&self) -> usize {
+    pub(super) const fn approximate_size(&self) -> usize {
         self.approximate_size
     }
 
@@ -89,13 +94,17 @@ impl<C: Comparer> MemTable<C> {
     }
 
     /// Returns the smallest seqnum in this memtable.
-    pub(super) fn min_seqnum(&self) -> Option<SeqNum> {
+    pub(super) const fn min_seqnum(&self) -> Option<SeqNum> {
         self.min_seqnum
     }
 
     /// Returns the largest seqnum in this memtable.
-    pub(super) fn max_seqnum(&self) -> Option<SeqNum> {
+    pub(super) const fn max_seqnum(&self) -> Option<SeqNum> {
         self.max_seqnum
+    }
+
+    pub(super) const fn wal_filenum(&self) -> u64 {
+        self.wal_filenum
     }
 
     pub(super) fn iter(&self) -> MemTableIter<'_, C> {

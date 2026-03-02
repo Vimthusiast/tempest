@@ -11,7 +11,7 @@ use tokio_uring::buf::BoundedBuf;
 use zerocopy::FromBytes;
 
 use crate::{
-    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
+    base::{ByteSize, Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
     fio::FioFile,
     silo::{
         iterator::TempestIterator,
@@ -159,21 +159,23 @@ impl<F: FioFile, C: Comparer> SstReader<F, C> {
         })
     }
 
-    pub async fn get<K: AsRef<[u8]>>(
-        &self,
-        key: &InternalKey<C, K>,
-    ) -> TempestResult<Option<Bytes>> {
+    #[instrument(skip(self), level = "trace")]
+    pub async fn get(&self, key: &InternalKey<C, &[u8]>) -> TempestResult<Option<Bytes>> {
         // check bloom filter first - if definitely not present, skip
         let c = C::default();
         let (prefix, _) = c.split_up(key.key().as_ref());
         if !self.bloom.maybe_contains(prefix) {
+            trace!("bloom filter negative");
             return Ok(None);
         }
+        trace!("bloom filter positive");
 
         // find the block that may contain this key
         let Some((block_offset, block_size)) = self.index.get_block_for(key) else {
+            trace!("not found in index");
             return Ok(None);
         };
+        trace!(block_offset, block_size=?ByteSize(block_size as u64), "found block for key in index");
 
         // load the block
         let block_buf = BytesMut::zeroed(block_size as usize);
@@ -183,6 +185,7 @@ impl<F: FioFile, C: Comparer> SstReader<F, C> {
             .await;
         res?;
         let block_buf = block_buf.into_inner();
+        trace!("loaded block from file system");
 
         // search within the block
         let reader = BlockReader::<C>::new(block_buf.freeze());

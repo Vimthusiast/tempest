@@ -111,12 +111,11 @@ impl<C: Comparer> IndexReader<C> {
     pub fn get_block_for<K: AsRef<[u8]>>(&self, key: &InternalKey<C, K>) -> Option<(u64, u32)> {
         let key = InternalKey::<C, &[u8]>::new(key.key().as_ref(), key.trailer());
         let (entries, offsets) = parse_index(&self.buf);
-        let c = C::default();
 
         // binary search for the first entry whose key >= search key
         let result = offsets.binary_search_by(|offset| {
             let (entry_key, _, _) = Self::decode_entry(entries, offset.get() as usize);
-            c.compare_physical(entry_key.key(), key.key())
+            entry_key.cmp(&key)
         });
 
         // we still check if first > key, because we just have the last block key in the index

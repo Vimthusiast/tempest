@@ -12,11 +12,8 @@ use tokio_uring::buf::BoundedBuf;
 use crate::{
     base::{ByteSize, HexU64, SeqNum, TempestError, TempestResult, bincode_options},
     fio::{FioFS, FioFile},
-    silo::{
-        config::ManifestConfig,
-    },
+    silo::config::ManifestConfig,
 };
-
 
 mod format;
 #[cfg(test)]
@@ -28,6 +25,7 @@ pub(super) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64)
     silo_root
         .as_ref()
         .join("ssts")
+        // TODO: should we have ssts in a fs level based hierarchy even?
         .join(format!("l-{}", level))
         .join(format!("{}.sst", filenum))
 }
@@ -787,6 +785,16 @@ impl<F: FioFS> SiloManifest<F> {
 
     pub(super) fn wal_filenums(&self) -> &[u64] {
         &self.wal_filenums
+    }
+
+    pub(super) fn max_flushed_seqnum(&self) -> SeqNum {
+        // TODO: We should track the max flushed seqnum to prevent this calculation, but this is
+        // easier and cheap enough for now. It's still O(N) though...
+        self.ssts
+            .iter()
+            .map(|s| s.max_seqnum)
+            .max()
+            .unwrap_or(SeqNum::ZERO)
     }
 }
 

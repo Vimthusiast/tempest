@@ -59,8 +59,9 @@ impl<F: FioFS> Tempest<F> {
         let mut write_futures = Vec::new();
         for (_id, handle) in &self.silo_handles {
             let mut batch = WriteBatch::new();
-            batch.put(b"key1", b"value1");
-            batch.put(b"key2", b"value2");
+            for i in 0..1024 {
+                batch.put(format!("key{:04}", i).as_ref(), b"v");
+            }
             write_futures.push(handle.write(batch));
         }
         let write_results = futures::future::join_all(write_futures).await;
@@ -89,13 +90,20 @@ impl<F: FioFS> Tempest<F> {
 
 #[cfg(test)]
 mod tests {
-    use tracing_subscriber::EnvFilter;
+
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+    use tracing_tree::HierarchicalLayer;
 
     use crate::base::SeqNum;
 
     pub(crate) fn setup_tracing() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
+        let layer = HierarchicalLayer::default()
+            .with_indent_lines(true)
+            .with_bracketed_fields(true);
+
+        let _ = tracing_subscriber::registry()
+            .with(layer)
+            .with(EnvFilter::from_default_env())
             .try_init();
     }
 

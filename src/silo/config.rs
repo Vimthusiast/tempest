@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone)]
 pub struct MemTableConfig {
     /// Approximate byte size before the active memtable is frozen.
@@ -7,10 +6,28 @@ pub struct MemTableConfig {
     pub max_immutable_count: usize,
 }
 
+impl Default for MemTableConfig {
+    fn default() -> Self {
+        Self {
+            size_threshold: 64 * 1024 * 1024, // 64 MiB
+            max_immutable_count: 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WalConfig {
     pub rotate_file_size_threshold: u64,
     pub rotate_record_count_threshold: u32,
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self {
+            rotate_file_size_threshold: 2 * 1024 * 1024 * 1024, // 2 GiB
+            rotate_record_count_threshold: 10_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +40,17 @@ pub struct ManifestConfig {
     pub growth_baseline: u64,
 }
 
+impl Default for ManifestConfig {
+    fn default() -> Self {
+        Self {
+            seqnum_limit_step: 1_000,
+            filenum_limit_step: 100,
+            growth_factor: 2,
+            growth_baseline: 8 * 1024 * 1024, // 8 MiB
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SstConfig {
     pub block_target_size: usize,
@@ -30,39 +58,23 @@ pub struct SstConfig {
     pub bloom_false_positive_rate: f64,
 }
 
+impl Default for SstConfig {
+    fn default() -> Self {
+        Self {
+            block_target_size: 4096,
+            block_restart_interval: 16,
+            bloom_false_positive_rate: 0.01,
+        }
+    }
+}
+
 /// Configuration for a storage silo and all its sub-components.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SiloConfig {
     pub memtable: MemTableConfig,
     pub wal: WalConfig,
     pub manifest: ManifestConfig,
     pub sst: SstConfig,
-}
-
-impl Default for SiloConfig {
-    fn default() -> Self {
-        Self {
-            memtable: MemTableConfig {
-                size_threshold: 64 * 1024 * 1024, // 64 MiB
-                max_immutable_count: 4,
-            },
-            wal: WalConfig {
-                rotate_file_size_threshold: 2 * 1024 * 1024 * 1024, // 2 GiB
-                rotate_record_count_threshold: 10_000,
-            },
-            manifest: ManifestConfig {
-                seqnum_limit_step: 1_000,
-                filenum_limit_step: 100,
-                growth_factor: 2,
-                growth_baseline: 8 * 1024 * 1024, // 8 MiB
-            },
-            sst: SstConfig {
-                block_target_size: 4096,
-                block_restart_interval: 16,
-                bloom_false_positive_rate: 0.01,
-            },
-        }
-    }
 }
 
 impl SiloConfig {
