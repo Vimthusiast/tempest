@@ -16,6 +16,7 @@ use crate::{
 };
 
 mod format;
+
 #[cfg(test)]
 mod tests;
 

@@ -22,6 +22,9 @@ use crate::{
 
 mod format;
 
+#[cfg(test)]
+mod tests;
+
 // NOTE: extend this to a flag set if we add more variants later and add getters
 // => potentially bitmask this
 #[derive(Debug)]
@@ -105,7 +108,8 @@ impl<F: FioFile> WalFileReader<F> {
         if let Err(e) = res {
             return (Err(e.into()), scratch);
         }
-        let record_prefix = WalRecordPrefix::decode(scratch[..SILO_WAL_RECORD_PREFIX_SIZE].try_into().unwrap());
+        let record_prefix =
+            WalRecordPrefix::decode(scratch[..SILO_WAL_RECORD_PREFIX_SIZE].try_into().unwrap());
         debug!(
             size = ?ByteSize(record_prefix.len as u64),
             checksum = ?HexU64(record_prefix.checksum),
@@ -416,57 +420,5 @@ impl<F: FioFS> SiloWal<F> {
 
     pub(super) fn current_filenum(&self) -> u64 {
         self.filenum
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        fio::VirtualFileSystem,
-        silo::config::SiloConfig,
-        tests::{filenum_gen, setup_tracing},
-    };
-
-    #[tokio::test]
-    async fn test_silo_wal() -> Result<(), Box<dyn std::error::Error>> {
-        setup_tracing();
-
-        let fs = VirtualFileSystem::new();
-        let silo_dir = PathBuf::from("data/silo0");
-        let mut next_filenum = filenum_gen();
-        let data = Bytes::from_static(b"some-test-data");
-
-        let first_filenum = next_filenum();
-        let second_filenum = next_filenum();
-
-        let config = SiloConfig::for_testing().wal;
-        {
-            let (mut wal, mut recovery_reader) = SiloWal::init(
-                fs.clone(),
-                silo_dir.clone(),
-                first_filenum,
-                &[],
-                config.clone(),
-            )
-            .await?;
-            let _ = wal.append(data.clone()).await?;
-            assert!(recovery_reader.next().await.is_none());
-        }
-
-        {
-            let (_, mut recovery_reader) = SiloWal::init(
-                fs.clone(),
-                silo_dir.clone(),
-                second_filenum,
-                &[first_filenum],
-                config.clone(),
-            )
-            .await?;
-            assert_eq!(recovery_reader.next().await.unwrap().unwrap(), data);
-            assert!(recovery_reader.next().await.is_none());
-        }
-
-        Ok(())
     }
 }
