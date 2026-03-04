@@ -1,7 +1,8 @@
 use bytes::{BufMut, BytesMut};
 use integer_encoding::VarInt;
+use tempest_core::utils::PrettyBytes;
 
-use crate::base::{KeyKind, PrettyBytes, SeqNum, TempestResult};
+use crate::base::{KeyKind, SeqNum, TempestResult};
 
 /// # Write Batch
 ///

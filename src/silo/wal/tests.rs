@@ -1,6 +1,7 @@
+use tempest_core::fio::VirtualFileSystem;
+
 use super::*;
 use crate::{
-    fio::VirtualFileSystem,
     silo::config::SiloConfig,
     tests::{filenum_gen, setup_tracing},
 };

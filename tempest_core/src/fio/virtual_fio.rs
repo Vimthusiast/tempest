@@ -137,7 +137,7 @@ impl VirtualFileSystem {
     /// Panics if any of the internal files are still accesses.
     ///
     /// [`Level::DEBUG`]: tracing::Level::DEBUG
-    #[cfg(test)]
+    #[cfg(feature = "testing")]
     pub fn debug(&self) {
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;
@@ -148,7 +148,7 @@ impl VirtualFileSystem {
         if !files.is_empty() {
             println!();
             for (path, file) in files.iter() {
-                use crate::base::PrettyBytes;
+                use crate::utils::PrettyBytes;
 
                 let file = file.try_read().expect("file not locked");
                 println!("-- {:?} --", path);

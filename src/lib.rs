@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use futures::FutureExt;
+use tempest_core::fio::FioFS;
 
 use crate::{
     base::{DefaultComparer, TempestResult},
-    fio::FioFS,
     silo::{SiloHandle, SiloWorker, batch::WriteBatch, config::SiloConfig},
 };
 
@@ -16,7 +16,6 @@ extern crate tracing;
 
 pub mod base;
 pub mod ctrl;
-pub mod fio;
 pub mod silo;
 
 #[cfg(test)]

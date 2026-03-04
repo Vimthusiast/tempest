@@ -1,9 +1,10 @@
 use std::{cmp::Ordering, marker::PhantomData};
 
 use bytes::{BufMut, Bytes, BytesMut};
+use tempest_core::utils::ByteSize;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, Ref, U32};
 
-use crate::base::{ByteSize, Comparer, InternalKey, KeyKind, KeyTrailer};
+use crate::base::{Comparer, InternalKey, KeyKind, KeyTrailer};
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
 #[repr(C)]

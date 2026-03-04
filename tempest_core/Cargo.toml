@@ -1,0 +1,19 @@
+[package]
+name = "tempest_core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+testing = []
+
+
+[dependencies]
+tokio-uring = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+derive_more = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+
+

@@ -1,11 +1,11 @@
 use std::marker::PhantomData;
 
 use bytes::Bytes;
+use tempest_core::fio::FioFile;
 use zerocopy::IntoBytes;
 
 use crate::{
     base::{Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
-    fio::FioFile,
     silo::{
         config::SstConfig,
         iterator::TempestIterator,

@@ -7,11 +7,11 @@ use std::{
 use bincode::Options as BincodeOptions;
 use bytes::{BufMut, BytesMut};
 use futures::{FutureExt, StreamExt, TryStreamExt};
+use tempest_core::{fio::{FioFS, FioFile}, utils::{ByteSize, HexU64}};
 use tokio_uring::buf::BoundedBuf;
 
 use crate::{
-    base::{ByteSize, HexU64, SeqNum, TempestError, TempestResult, bincode_options},
-    fio::{FioFS, FioFile},
+    base::{SeqNum, TempestError, TempestResult, bincode_options},
     silo::config::ManifestConfig,
 };
 

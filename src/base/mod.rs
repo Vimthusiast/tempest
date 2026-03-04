@@ -20,11 +20,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod comparer;
 pub mod error;
-pub mod utils;
 
 pub use comparer::*;
 pub use error::*;
-pub use utils::*;
+use tempest_core::utils::PrettyBytes;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U64};
 
 /// Magic number for the manifest files, as a first check for file validation.

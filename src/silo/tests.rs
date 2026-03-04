@@ -1,6 +1,7 @@
+use tempest_core::fio::VirtualFileSystem;
 use tracing::{Instrument, Level};
 
-use crate::{fio::VirtualFileSystem, silo::iterator::TempestIterator, tests::setup_tracing};
+use crate::{silo::iterator::TempestIterator, tests::setup_tracing};
 
 use super::*;
 

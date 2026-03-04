@@ -16,7 +16,6 @@ use crate::{
         Comparer, DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum, TempestError,
         TempestResult,
     },
-    fio::FioFS,
     silo::{
         batch::WriteBatch,
         config::SiloConfig,
@@ -32,6 +31,7 @@ use crate::{
 
 use bytes::{Buf, Bytes};
 use integer_encoding::VarInt;
+use tempest_core::fio::FioFS;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Level, instrument};
 

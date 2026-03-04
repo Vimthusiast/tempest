@@ -4,10 +4,10 @@ extern crate tracing;
 use tempest::{
     Tempest,
     base::TempestResult,
-    fio::UringFileSystem,
     silo::config::{MemTableConfig, SiloConfig},
 };
 
+use tempest_core::fio::UringFileSystem;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]

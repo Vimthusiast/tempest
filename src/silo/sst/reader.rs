@@ -7,12 +7,12 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use tempest_core::{fio::FioFile, utils::ByteSize};
 use tokio_uring::buf::BoundedBuf;
 use zerocopy::FromBytes;
 
 use crate::{
-    base::{ByteSize, Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
-    fio::FioFile,
+    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
     silo::{
         iterator::TempestIterator,
         sst::{

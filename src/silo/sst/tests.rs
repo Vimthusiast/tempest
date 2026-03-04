@@ -1,11 +1,11 @@
 use super::reader::SstReader;
 use super::writer::SstWriter;
 use crate::base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
-use crate::fio::{FioFS, FioFile, VirtualFile, VirtualFileSystem};
 use crate::silo::config::SiloConfig;
 use crate::silo::iterator::TempestIterator;
 use crate::tests::setup_tracing;
 use bytes::Bytes;
+use tempest_core::fio::{FioFS, FioFile, VirtualFile, VirtualFileSystem};
 
 fn make_trailer(seqnum: u64, kind: KeyKind) -> KeyTrailer {
     KeyTrailer::new(unsafe { SeqNum::new_unchecked(seqnum) }, kind)

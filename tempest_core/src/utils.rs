@@ -8,7 +8,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```
-/// # use tempest::base::ByteSize;
+/// # use tempest_core::utils::ByteSize;
 /// assert_eq!(format!("{:?}", ByteSize(484)),        "484B");
 /// assert_eq!(format!("{:?}", ByteSize(1536)),       "1.5KiB");
 /// assert_eq!(format!("{:?}", ByteSize(2147483648)), "2GiB");
@@ -60,7 +60,7 @@ impl fmt::Debug for ByteSize {
 /// # Examples
 ///
 /// ```
-/// # use tempest::base::PrettyBytes;
+/// # use tempest_core::utils::PrettyBytes;
 /// assert_eq!(format!("{:?}", PrettyBytes(b"key1")), "b\"key1\"");
 /// assert_eq!(format!("{:?}", PrettyBytes(b"\x00\xFF")), "b\"\\x00\\xff\"");
 /// ```
