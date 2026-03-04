@@ -15,5 +15,7 @@ tracing = { workspace = true }
 derive_more = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
-
+serde = { workspace = true }
+bincode = { workspace = true }
+crc64 = { workspace = true }
 

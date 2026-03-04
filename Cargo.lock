@@ -631,9 +631,12 @@ name = "tempest_core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "bytes",
+ "crc64",
  "derive_more",
  "futures",
+ "serde",
  "tokio",
  "tokio-uring",
  "tracing",
