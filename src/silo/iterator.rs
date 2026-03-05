@@ -356,8 +356,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tempest_core::test_utils::setup_tracing;
+
     use crate::base::{DefaultComparer, FixedSuffixComparer, KeyKind, KeyTrailer};
-    use crate::tests::setup_tracing;
 
     use super::*;
     use std::task::Context;

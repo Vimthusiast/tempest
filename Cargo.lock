@@ -640,6 +640,8 @@ dependencies = [
  "tokio",
  "tokio-uring",
  "tracing",
+ "tracing-subscriber",
+ "tracing-tree",
 ]
 
 [[package]]

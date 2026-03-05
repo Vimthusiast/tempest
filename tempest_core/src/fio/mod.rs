@@ -19,8 +19,8 @@ pub use uring_fio::*;
 pub use virtual_fio::*;
 
 pub struct FioDirEntry {
-    path: PathBuf,
-    is_dir: bool,
+    pub path: PathBuf,
+    pub is_dir: bool,
 }
 
 impl FioDirEntry {

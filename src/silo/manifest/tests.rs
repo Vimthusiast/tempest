@@ -1,8 +1,8 @@
 use bytes::Bytes;
-use tempest_core::fio::VirtualFileSystem;
+use tempest_core::{fio::VirtualFileSystem, test_utils::setup_tracing};
 use tracing::Level;
 
-use crate::{silo::config::SiloConfig, tests::setup_tracing};
+use crate::silo::config::SiloConfig;
 
 use super::*;
 

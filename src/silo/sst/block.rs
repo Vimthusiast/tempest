@@ -329,9 +329,9 @@ mod tests {
     use crate::{
         base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
         silo::config::SiloConfig,
-        tests::setup_tracing,
     };
     use bytes::Bytes;
+    use tempest_core::test_utils::setup_tracing;
 
     fn make_trailer(seqnum: u64, kind: KeyKind) -> KeyTrailer {
         KeyTrailer::new(unsafe { SeqNum::new_unchecked(seqnum) }, kind)
