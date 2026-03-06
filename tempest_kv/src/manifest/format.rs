@@ -43,18 +43,18 @@ pub(crate) struct SstDeletion {
     ssts_removed.as_ref().map(|v| v.len()).unwrap_or(0),
 )]
 pub(crate) struct ManifestEditV1 {
-    pub(super) seqnum_limit: Option<SeqNum>,
-    pub(super) filenum_limit: Option<u64>,
+    pub(crate) seqnum_limit: Option<SeqNum>,
+    pub(crate) filenum_limit: Option<u64>,
 
     /// A list of new [`SstMetadata`] objects that register SST files to the [`SiloManifest`].
-    pub(super) ssts_added: Option<Vec<SstMetadata>>,
+    pub(crate) ssts_added: Option<Vec<SstMetadata>>,
 
     /// A list of removed [`SstMetadata`] objects, identified by their level and file ID,
     /// that register SST files to the [`SiloManifest`].
-    pub(super) ssts_removed: Option<Vec<SstDeletion>>,
+    pub(crate) ssts_removed: Option<Vec<SstDeletion>>,
 
-    pub(super) wal_filenums_added: Option<Vec<u64>>,
-    pub(super) wal_filenums_removed: Option<Vec<u64>>,
+    pub(crate) wal_filenums_added: Option<Vec<u64>>,
+    pub(crate) wal_filenums_removed: Option<Vec<u64>>,
 }
 
 /// A versioned list of edits to the [`SiloManifest`].
@@ -66,7 +66,7 @@ pub(crate) enum ManifestEdit {
 }
 
 impl ManifestEdit {
-    pub(super) fn into_latest(self) -> ManifestEditV1 {
+    pub(crate) fn into_latest(self) -> ManifestEditV1 {
         match self {
             ManifestEdit::V1(edit) => edit,
         }
@@ -74,31 +74,31 @@ impl ManifestEdit {
 }
 
 /// Total size of a [`SiloManifestHeader`] after encoding.
-pub(super) const SILO_MANIFEST_HEADER_SIZE: usize = 24;
+pub(crate) const SILO_MANIFEST_HEADER_SIZE: usize = 24;
 
-pub(super) struct SiloManifestHeader {
-    pub(super) filenum: u64,
-    pub(super) filename: PathBuf,
+pub(crate) struct SiloManifestHeader {
+    pub(crate) filenum: u64,
+    pub(crate) filename: PathBuf,
 }
 
 impl SiloManifestHeader {
-    pub(super) fn new(filenum: u64) -> Self {
+    pub(crate) fn new(filenum: u64) -> Self {
         // allocate filename once, to safe on future allocations using `get_filename`
         let filename = PathBuf::from(format!("MANIFEST-{}", filenum));
         Self { filenum, filename }
     }
 
     #[inline]
-    pub(super) const fn filenum(&self) -> u64 {
+    pub(crate) const fn filenum(&self) -> u64 {
         self.filenum
     }
 
     #[inline]
-    pub(super) fn get_filename(&self) -> &Path {
+    pub(crate) fn get_filename(&self) -> &Path {
         &self.filename
     }
 
-    pub(super) fn encode(&self) -> [u8; SILO_MANIFEST_HEADER_SIZE] {
+    pub(crate) fn encode(&self) -> [u8; SILO_MANIFEST_HEADER_SIZE] {
         let mut buf = [0u8; SILO_MANIFEST_HEADER_SIZE];
         // 1. Magic bytes
         buf[0..8].copy_from_slice(SILO_MANIFEST_MAGICNUM);
@@ -113,7 +113,7 @@ impl SiloManifestHeader {
         buf
     }
 
-    pub(super) fn decode(buf: &[u8; SILO_MANIFEST_HEADER_SIZE]) -> io::Result<Self> {
+    pub(crate) fn decode(buf: &[u8; SILO_MANIFEST_HEADER_SIZE]) -> io::Result<Self> {
         let magic_bytes = &buf[0..8];
         if magic_bytes != SILO_MANIFEST_MAGICNUM {
             return Err(io::Error::new(
@@ -142,16 +142,16 @@ impl SiloManifestHeader {
 }
 
 /// Total size of a record prefix in a silo manifest.
-pub(super) const SILO_MANIFEST_RECORD_PREFIX_SIZE: usize = 12;
+pub(crate) const SILO_MANIFEST_RECORD_PREFIX_SIZE: usize = 12;
 
-pub(super) struct SiloManifestRecordPrefix {
-    pub(super) data_len: u32,
-    pub(super) checksum: u64,
+pub(crate) struct SiloManifestRecordPrefix {
+    pub(crate) data_len: u32,
+    pub(crate) checksum: u64,
 }
 
 impl SiloManifestRecordPrefix {
     /// Creates a new record prefix for some data, providing a frame with a checksum.
-    pub(super) fn new(data: &[u8]) -> Self {
+    pub(crate) fn new(data: &[u8]) -> Self {
         assert!(
             data.len() <= u32::MAX as usize,
             "manifest record size may not exceed 2^32 bytes."
@@ -168,7 +168,7 @@ impl SiloManifestRecordPrefix {
     ///
     /// Panics if `data.len()` is different from `self.data_len`.
     #[inline]
-    pub(super) fn is_valid_record(&self, data: &[u8]) -> bool {
+    pub(crate) fn is_valid_record(&self, data: &[u8]) -> bool {
         assert_eq!(data.len(), self.data_len as usize);
         let computed_checksum = crc64(0, data);
         self.checksum == computed_checksum
@@ -176,7 +176,7 @@ impl SiloManifestRecordPrefix {
 
     /// Encodes this record prefix into bytes.
     #[inline]
-    pub(super) fn encode(&self) -> [u8; SILO_MANIFEST_RECORD_PREFIX_SIZE] {
+    pub(crate) fn encode(&self) -> [u8; SILO_MANIFEST_RECORD_PREFIX_SIZE] {
         let mut buf = [0u8; SILO_MANIFEST_RECORD_PREFIX_SIZE];
         buf[0..4].copy_from_slice(&self.data_len.to_le_bytes());
         buf[4..12].copy_from_slice(&self.checksum.to_le_bytes());
@@ -185,7 +185,7 @@ impl SiloManifestRecordPrefix {
 
     /// Decodes this record prefix from a byte slice.
     #[inline]
-    pub(super) fn decode(buf: &[u8; SILO_MANIFEST_RECORD_PREFIX_SIZE]) -> Self {
+    pub(crate) fn decode(buf: &[u8; SILO_MANIFEST_RECORD_PREFIX_SIZE]) -> Self {
         let data_len = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         let checksum = u64::from_le_bytes(buf[4..12].try_into().unwrap());
         Self { data_len, checksum }

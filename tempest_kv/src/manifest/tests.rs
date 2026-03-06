@@ -2,7 +2,7 @@ use bytes::Bytes;
 use tempest_core::{fio::VirtualFileSystem, test_utils::setup_tracing};
 use tracing::Level;
 
-use crate::silo::config::SiloConfig;
+use crate::config::SiloConfig;
 
 use super::*;
 
@@ -43,7 +43,7 @@ fn test_manifest() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             let seqnums_needed = 10;
             let response = manifest
                 .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
@@ -61,7 +61,7 @@ fn test_manifest() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             // simulate big seqnum request (about 1.5x the limit step)
             let seqnums_needed = config.seqnum_limit_step * 3 / 2 + 10;
             let resp = manifest
@@ -84,7 +84,7 @@ fn test_manifest() {
             first_seqnum_range, second_seqnum_range,
         );
 
-        Ok::<(), TempestError>(())
+        Ok::<(), StorageError>(())
     })
     .unwrap();
 }
@@ -101,7 +101,7 @@ fn test_wal_filenum_tracking_persists_across_restart() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             manifest
                 .handle_request(
                     ManifestRequest::new().with_wal_filenums_added(wal_filenums.clone()),
@@ -113,7 +113,7 @@ fn test_wal_filenum_tracking_persists_across_restart() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             assert_eq!(
                 manifest.wal_filenums(),
                 &wal_filenums,
@@ -122,7 +122,7 @@ fn test_wal_filenum_tracking_persists_across_restart() {
             manifest.shutdown().await?;
         }
 
-        Ok::<(), TempestError>(())
+        Ok::<(), StorageError>(())
     })
     .unwrap();
 }
@@ -137,7 +137,7 @@ fn test_wal_filenum_removal_persists_across_restart() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             // register three WAL files
             manifest
                 .handle_request(ManifestRequest::new().with_wal_filenums_added([10u64, 11, 12]))
@@ -152,7 +152,7 @@ fn test_wal_filenum_removal_persists_across_restart() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             assert_eq!(
                 manifest.wal_filenums(),
                 &[12u64],
@@ -161,7 +161,7 @@ fn test_wal_filenum_removal_persists_across_restart() {
             manifest.shutdown().await?;
         }
 
-        Ok::<(), TempestError>(())
+        Ok::<(), StorageError>(())
     })
     .unwrap();
 }
@@ -184,7 +184,7 @@ fn test_manifest_rotation_preserves_wal_filenums() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             manifest
                 .handle_request(
                     ManifestRequest::new().with_wal_filenums_added(wal_filenums.clone()),
@@ -202,7 +202,7 @@ fn test_manifest_rotation_preserves_wal_filenums() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
             assert_eq!(
                 manifest.wal_filenums(),
                 &wal_filenums,
@@ -211,7 +211,7 @@ fn test_manifest_rotation_preserves_wal_filenums() {
             manifest.shutdown().await?;
         }
 
-        Ok::<(), TempestError>(())
+        Ok::<(), StorageError>(())
     })
     .unwrap();
 }
@@ -228,7 +228,7 @@ fn test_sst_and_wal_in_same_edit() {
 
         {
             let mut manifest =
-                SiloManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
 
             // pre-register a WAL file
             manifest
@@ -259,7 +259,7 @@ fn test_sst_and_wal_in_same_edit() {
         }
 
         {
-            let mut manifest = SiloManifest::init(fs.clone(), silo_root.clone(), config).await?;
+            let mut manifest = StorageManifest::init(fs.clone(), silo_root.clone(), config).await?;
             assert_eq!(manifest.ssts().len(), 1, "sst must persist");
             assert!(
                 manifest.wal_filenums().is_empty(),
@@ -268,7 +268,7 @@ fn test_sst_and_wal_in_same_edit() {
             manifest.shutdown().await?;
         }
 
-        Ok::<(), TempestError>(())
+        Ok::<(), StorageError>(())
     })
     .unwrap();
 }

@@ -1,7 +1,7 @@
 use tempest_core::{fio::VirtualFileSystem, test_utils::setup_tracing};
 
 use super::*;
-use crate::{silo::config::SiloConfig, tests::filenum_gen};
+use crate::{config::SiloConfig, tests::filenum_gen};
 
 #[tokio::test]
 async fn test_silo_wal() -> Result<(), Box<dyn std::error::Error>> {

@@ -12,15 +12,13 @@ use tokio_uring::buf::BoundedBuf;
 use zerocopy::FromBytes;
 
 use crate::{
-    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
-    silo::{
-        iterator::TempestIterator,
-        sst::{
-            SstFooter,
-            block::{BlockIterator, BlockReader},
-            bloom::BloomFilter,
-            index::IndexReader,
-        },
+    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, StorageResult},
+    iterator::StorageIterator,
+    sst::{
+        SstFooter,
+        block::{BlockIterator, BlockReader},
+        bloom::BloomFilter,
+        index::IndexReader,
     },
 };
 
@@ -36,7 +34,7 @@ pub struct SstIterator<F: FioFile, C: Comparer> {
     /// the position of the current block within the index
     index_pos: usize,
     /// in-progress block load future
-    loading: Option<Pin<Box<dyn Future<Output = TempestResult<Bytes>>>>>,
+    loading: Option<Pin<Box<dyn Future<Output = StorageResult<Bytes>>>>>,
     _marker: PhantomData<C>,
 }
 
@@ -54,8 +52,8 @@ impl<F: FioFile, C: Comparer> SstIterator<F, C> {
     }
 }
 
-impl<F: FioFile, C: Comparer> TempestIterator<'_, C> for SstIterator<F, C> {
-    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<TempestResult<Option<()>>> {
+impl<F: FioFile, C: Comparer> StorageIterator<'_, C> for SstIterator<F, C> {
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<StorageResult<Option<()>>> {
         loop {
             if let Some(loading) = &mut self.loading {
                 match loading.as_mut().poll(cx) {
@@ -109,7 +107,7 @@ pub struct SstReader<F: FioFile, C: Comparer> {
 }
 
 impl<F: FioFile, C: Comparer> SstReader<F, C> {
-    pub async fn open(file: F) -> TempestResult<Self> {
+    pub async fn open(file: F) -> StorageResult<Self> {
         let file = Arc::new(file);
         // read footer
         let file_size = file.size().await?;
@@ -160,7 +158,7 @@ impl<F: FioFile, C: Comparer> SstReader<F, C> {
     }
 
     #[instrument(skip(self), level = "trace")]
-    pub async fn get(&self, key: &InternalKey<C, &[u8]>) -> TempestResult<Option<Bytes>> {
+    pub async fn get(&self, key: &InternalKey<C, &[u8]>) -> StorageResult<Option<Bytes>> {
         // check bloom filter first - if definitely not present, skip
         let c = C::default();
         let (prefix, _) = c.split_up(key.key().as_ref());

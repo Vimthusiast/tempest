@@ -1,13 +1,13 @@
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U32, U64};
 
-use crate::silo::sst::bloom::BloomFilterFooter;
+use crate::sst::bloom::BloomFilterFooter;
 
-pub mod block;
-pub mod bloom;
-pub mod index;
+pub(crate) mod block;
+pub(crate) mod bloom;
+pub(crate) mod index;
 
-pub mod reader;
-pub mod writer;
+pub(crate) mod reader;
+pub(crate) mod writer;
 
 #[cfg(test)]
 mod tests;

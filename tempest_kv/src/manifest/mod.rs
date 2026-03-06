@@ -7,12 +7,15 @@ use std::{
 use bincode::Options as BincodeOptions;
 use bytes::{BufMut, BytesMut};
 use futures::{FutureExt, StreamExt, TryStreamExt};
-use tempest_core::{fio::{FioFS, FioFile}, utils::{ByteSize, HexU64}};
+use tempest_core::{
+    fio::{FioFS, FioFile},
+    utils::{ByteSize, HexU64},
+};
 use tokio_uring::buf::BoundedBuf;
 
 use crate::{
-    base::{SeqNum, TempestError, TempestResult, bincode_options},
-    silo::config::ManifestConfig,
+    base::{SeqNum, StorageError, StorageResult, bincode_options},
+    config::ManifestConfig,
 };
 
 mod format;
@@ -22,7 +25,7 @@ mod tests;
 
 pub(crate) use format::*;
 
-pub(super) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64) -> PathBuf {
+pub(crate) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64) -> PathBuf {
     silo_root
         .as_ref()
         .join("ssts")
@@ -32,7 +35,7 @@ pub(super) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64)
 }
 
 #[derive(Debug, Default)]
-pub(super) struct ManifestRequest {
+pub(crate) struct ManifestRequest {
     pub ssts_added: Vec<SstMetadata>,
     pub ssts_removed: Vec<SstDeletion>,
     pub wal_filenums_added: Vec<u64>,
@@ -77,14 +80,14 @@ impl ManifestRequest {
     }
 }
 
-pub(super) struct ManifestResponse {
+pub(crate) struct ManifestResponse {
     pub seqnum_range: std::ops::Range<SeqNum>,
     pub filenum_range: std::ops::Range<u64>,
 }
 
 /// Manages reads and writes to the manifest of a silo.
 #[derive(Debug)]
-pub(super) struct SiloManifest<F: FioFS> {
+pub(crate) struct StorageManifest<F: FioFS> {
     /// The root path of the silo this manifest belongs to.
     silo_root: PathBuf,
     /// The path to the directory, where manifest files are in.
@@ -129,13 +132,13 @@ pub(super) struct SiloManifest<F: FioFS> {
     config: ManifestConfig,
 }
 
-impl<F: FioFS> SiloManifest<F> {
+impl<F: FioFS> StorageManifest<F> {
     #[instrument(skip_all, level = "info")]
-    pub(super) async fn init(
+    pub(crate) async fn init(
         fs: F,
         silo_root: PathBuf,
         config: ManifestConfig,
-    ) -> TempestResult<Self> {
+    ) -> StorageResult<Self> {
         info!("initializing silo manifest at {:?}", silo_root);
         let manifest_dir = silo_root.join("manifest");
         fs.create_dir_all(&manifest_dir).await?;
@@ -183,7 +186,7 @@ impl<F: FioFS> SiloManifest<F> {
                             }
                         };
 
-                        Ok::<_, TempestError>((header.filenum, path, file))
+                        Ok::<_, StorageError>((header.filenum, path, file))
                     }
                 })
                 // run 10 reads at once
@@ -359,7 +362,7 @@ impl<F: FioFS> SiloManifest<F> {
         })
     }
 
-    pub(super) async fn shutdown(&mut self) -> TempestResult<()> {
+    pub(crate) async fn shutdown(&mut self) -> StorageResult<()> {
         assert!(!self.is_shutdown, "silo has been shut down");
 
         // tighten down seqnum and filenum limit
@@ -387,7 +390,7 @@ impl<F: FioFS> SiloManifest<F> {
         Ok(())
     }
 
-    async fn write_to_new_file(&mut self) -> TempestResult<()> {
+    async fn write_to_new_file(&mut self) -> StorageResult<()> {
         assert!(!self.is_shutdown, "silo has been shut down");
         let (filenum_range, filenum_limit) = self.calculate_filenum_range(1)?;
         let filenum = filenum_range.start;
@@ -444,7 +447,7 @@ impl<F: FioFS> SiloManifest<F> {
         mut scratch: BytesMut,
         filenum: u64,
         initial_edit: &ManifestEdit,
-    ) -> (TempestResult<u64>, BytesMut) {
+    ) -> (StorageResult<u64>, BytesMut) {
         debug!(filenum, "writing manifest to new file");
         // clear scratch buffer
         scratch.clear();
@@ -477,7 +480,7 @@ impl<F: FioFS> SiloManifest<F> {
         mut scratch: BytesMut,
         file: &<F as FioFS>::File,
         filepos: u64,
-    ) -> (TempestResult<u64>, BytesMut) {
+    ) -> (StorageResult<u64>, BytesMut) {
         // clear the scratch buffer
         scratch.clear();
 
@@ -506,7 +509,7 @@ impl<F: FioFS> SiloManifest<F> {
         (Ok(buf.len() as u64), buf)
     }
 
-    async fn append_framed_edit(&mut self, edit: &ManifestEdit) -> TempestResult<()> {
+    async fn append_framed_edit(&mut self, edit: &ManifestEdit) -> StorageResult<()> {
         let mut scratch = self.scratch.take().expect("scatch buffer exists");
         scratch.clear();
 
@@ -526,7 +529,7 @@ impl<F: FioFS> SiloManifest<F> {
         mut scratch: BytesMut,
         file: &<F as FioFS>::File,
         filepos: u64,
-    ) -> (TempestResult<(ManifestEdit, u64)>, BytesMut) {
+    ) -> (StorageResult<(ManifestEdit, u64)>, BytesMut) {
         let mut current_filepos = filepos;
 
         // clear the scratch buffer
@@ -596,12 +599,12 @@ impl<F: FioFS> SiloManifest<F> {
     fn calculate_filenum_range(
         &self,
         size: u64,
-    ) -> TempestResult<(std::ops::Range<u64>, Option<u64>)> {
+    ) -> StorageResult<(std::ops::Range<u64>, Option<u64>)> {
         let start = self.filenum_current;
 
         let end = start
             .checked_add(size)
-            .ok_or(TempestError::FileNumOverflow)?;
+            .ok_or(StorageError::FileNumOverflow)?;
 
         let range = start..end;
         if end > self.filenum_limit {
@@ -615,13 +618,13 @@ impl<F: FioFS> SiloManifest<F> {
     fn calculate_seqnum_range(
         &self,
         size: u64,
-    ) -> TempestResult<(std::ops::Range<SeqNum>, Option<SeqNum>)> {
+    ) -> StorageResult<(std::ops::Range<SeqNum>, Option<SeqNum>)> {
         let start = self.seqnum_current;
 
         let raw_end = start
             .get()
             .checked_add(size)
-            .ok_or(TempestError::SeqNumOverflow(u64::MAX))?;
+            .ok_or(StorageError::SeqNumOverflow(u64::MAX))?;
 
         let end = SeqNum::try_from(raw_end)?;
 
@@ -637,7 +640,7 @@ impl<F: FioFS> SiloManifest<F> {
         }
     }
 
-    pub(super) fn apply_edit(&mut self, edit: ManifestEdit) {
+    pub(crate) fn apply_edit(&mut self, edit: ManifestEdit) {
         let edit = edit.into_latest();
 
         if let Some(sl) = edit.seqnum_limit {
@@ -667,7 +670,7 @@ impl<F: FioFS> SiloManifest<F> {
         }
     }
 
-    async fn maybe_rotate(&mut self) -> TempestResult<()> {
+    async fn maybe_rotate(&mut self) -> StorageResult<()> {
         let threshold = std::cmp::max(
             self.initial_file_size * self.config.growth_factor,
             self.config.growth_baseline,
@@ -682,10 +685,10 @@ impl<F: FioFS> SiloManifest<F> {
     }
 
     #[instrument(skip(self))]
-    pub(super) async fn handle_request(
+    pub(crate) async fn handle_request(
         &mut self,
         req: ManifestRequest,
-    ) -> TempestResult<ManifestResponse> {
+    ) -> StorageResult<ManifestResponse> {
         let mut requires_write = false;
         let mut edit = ManifestEditV1::default();
 
@@ -745,7 +748,7 @@ impl<F: FioFS> SiloManifest<F> {
         })
     }
 
-    pub(super) async fn get_seqnums(&mut self, n: u64) -> TempestResult<std::ops::Range<SeqNum>> {
+    pub(crate) async fn get_seqnums(&mut self, n: u64) -> StorageResult<std::ops::Range<SeqNum>> {
         let (range, new_limit) = self.calculate_seqnum_range(n)?;
         if new_limit.is_some() {
             // Slow path: we have to write a new limit to disk
@@ -760,7 +763,7 @@ impl<F: FioFS> SiloManifest<F> {
         }
     }
 
-    pub(super) async fn get_filenums(&mut self, n: u64) -> TempestResult<std::ops::Range<u64>> {
+    pub(crate) async fn get_filenums(&mut self, n: u64) -> StorageResult<std::ops::Range<u64>> {
         let (range, new_limit) = self.calculate_filenum_range(n)?;
         if new_limit.is_some() {
             // Slow path: we have to write a new limit to disk
@@ -776,19 +779,19 @@ impl<F: FioFS> SiloManifest<F> {
     }
 
     /// Returns the next sequence number that will be used.
-    pub(super) const fn seqnum_current(&self) -> SeqNum {
+    pub(crate) const fn seqnum_current(&self) -> SeqNum {
         self.seqnum_current
     }
 
-    pub(super) fn ssts(&self) -> &[SstMetadata] {
+    pub(crate) fn ssts(&self) -> &[SstMetadata] {
         &self.ssts
     }
 
-    pub(super) fn wal_filenums(&self) -> &[u64] {
+    pub(crate) fn wal_filenums(&self) -> &[u64] {
         &self.wal_filenums
     }
 
-    pub(super) fn max_flushed_seqnum(&self) -> SeqNum {
+    pub(crate) fn max_flushed_seqnum(&self) -> SeqNum {
         // TODO: We should track the max flushed seqnum to prevent this calculation, but this is
         // easier and cheap enough for now. It's still O(N) though...
         self.ssts
@@ -799,7 +802,7 @@ impl<F: FioFS> SiloManifest<F> {
     }
 }
 
-impl<F: FioFS> Drop for SiloManifest<F> {
+impl<F: FioFS> Drop for StorageManifest<F> {
     fn drop(&mut self) {
         if !self.is_shutdown {
             error!("silo manifest was not shut down correctly");

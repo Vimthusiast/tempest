@@ -13,20 +13,16 @@ use std::{path::PathBuf, sync::Arc, thread};
 
 use crate::{
     base::{
-        Comparer, DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum, TempestError,
-        TempestResult,
+        Comparer, DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum, StorageError,
+        StorageResult,
     },
-    silo::{
-        batch::WriteBatch,
-        config::SiloConfig,
-        iterator::{
-            DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry, SyncIterator,
-        },
-        manifest::{ManifestRequest, SiloManifest, SstMetadata, get_sst_path},
-        memtable::MemTable,
-        sst::{reader::SstReader, writer::SstWriter},
-        wal::SiloWal,
-    },
+    batch::WriteBatch,
+    config::SiloConfig,
+    iterator::{DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry, SyncIterator},
+    manifest::{ManifestRequest, StorageManifest, SstMetadata, get_sst_path},
+    memtable::MemTable,
+    sst::{reader::SstReader, writer::SstWriter},
+    wal::SiloWal,
 };
 
 use bytes::{Buf, Bytes};
@@ -35,6 +31,13 @@ use tempest_core::fio::FioFS;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Level, instrument};
 
+#[macro_use]
+extern crate derive_more;
+
+#[macro_use]
+extern crate tracing;
+
+pub mod base;
 pub mod batch;
 pub mod config;
 pub mod iterator;
@@ -56,7 +59,7 @@ pub struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
     fs: F,
 
     /// The manifest that manages state of this silo.
-    manifest: SiloManifest<F>,
+    manifest: StorageManifest<F>,
 
     /// The write-ahead log that ensure durability of writes to this silo.
     wal: SiloWal<F>,
@@ -84,13 +87,13 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         fs: F,
         root_dir: impl Into<PathBuf>,
         config: SiloConfig,
-    ) -> TempestResult<Self> {
+    ) -> StorageResult<Self> {
         info!(?config, "initializing silo");
         let root_dir = root_dir.into();
 
         // initialize manifest
         let mut manifest =
-            SiloManifest::init(fs.clone(), root_dir.clone(), config.manifest.clone()).await?;
+            StorageManifest::init(fs.clone(), root_dir.clone(), config.manifest.clone()).await?;
 
         // allocate filenums for other components
         let filenum_range = manifest.get_filenums(1).await?;
@@ -160,13 +163,13 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         Ok(silo)
     }
 
-    async fn get_seqnum(&mut self) -> TempestResult<SeqNum> {
+    async fn get_seqnum(&mut self) -> StorageResult<SeqNum> {
         let range = self.manifest.get_seqnums(1).await?;
         Ok(range.start)
     }
 
     #[instrument(skip_all, level = "debug")]
-    pub(crate) async fn write(&mut self, mut batch: WriteBatch) -> TempestResult<()> {
+    pub(crate) async fn write(&mut self, mut batch: WriteBatch) -> StorageResult<()> {
         trace!("writing batch: {:?}", batch);
         let seqnum = self.get_seqnum().await?;
         batch.commit(seqnum);
@@ -195,7 +198,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         Ok(())
     }
 
-    fn apply_batch_to_memtable(&mut self, mut body: Bytes) -> TempestResult<()> {
+    fn apply_batch_to_memtable(&mut self, mut body: Bytes) -> StorageResult<()> {
         let header = body.split_to(12);
 
         let seqnum_raw = u64::from_le_bytes(header[0..8].try_into().unwrap());
@@ -214,7 +217,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
             // get key length varint
             let (key_len, varint_bytes_read) =
-                read_varint(&body[..]).ok_or(TempestError::InvalidVarint)?;
+                read_varint(&body[..]).ok_or(StorageError::InvalidVarint)?;
             body.advance(varint_bytes_read);
 
             // get key
@@ -228,7 +231,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
                 KeyKind::Put => {
                     // get value length varint
                     let (value_len, varint_bytes_read) =
-                        read_varint(&body[..]).ok_or(TempestError::InvalidVarint)?;
+                        read_varint(&body[..]).ok_or(StorageError::InvalidVarint)?;
                     body.advance(varint_bytes_read);
 
                     // get value
@@ -260,7 +263,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         self.immutables.insert(0, Arc::new(frozen));
     }
 
-    async fn maybe_flush(&mut self) -> TempestResult<()> {
+    async fn maybe_flush(&mut self) -> StorageResult<()> {
         while !self.immutables.is_empty() {
             self.flush_oldest_immutable().await?;
         }
@@ -268,7 +271,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
     }
 
     #[instrument(skip_all)]
-    async fn flush_oldest_immutable(&mut self) -> TempestResult<()> {
+    async fn flush_oldest_immutable(&mut self) -> StorageResult<()> {
         let imm = self.immutables.last().expect("checked by caller");
 
         let entry_count = imm.len();
@@ -348,7 +351,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
     }
 
     #[instrument(skip(self), level = "debug")]
-    pub(crate) async fn get(&self, key: &Bytes, snapshot: SeqNum) -> TempestResult<Option<Bytes>> {
+    pub(crate) async fn get(&self, key: &Bytes, snapshot: SeqNum) -> StorageResult<Option<Bytes>> {
         debug!("checking active memtable");
         if let Some(active_result) = self.active.get(&key, snapshot) {
             return Ok(Some(active_result));
@@ -380,7 +383,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
     #[instrument(skip_all, level = "debug")]
     pub(crate) async fn scan(
         &self,
-    ) -> TempestResult<DeduplicatingIterator<'_, MergingIterator<'_, C>, C>> {
+    ) -> StorageResult<DeduplicatingIterator<'_, MergingIterator<'_, C>, C>> {
         let mut sources = Vec::new();
 
         // -- pull from active memtable --
@@ -418,7 +421,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
     }
 
     #[instrument(skip_all)]
-    pub async fn shutdown(&mut self) -> TempestResult<()> {
+    pub async fn shutdown(&mut self) -> StorageResult<()> {
         assert!(!self.is_shutdown);
         // NB: Set this to true, even if this function may return an error,
         // since we may shut down partially, which means we don't want to call shutdown again,
@@ -453,7 +456,7 @@ pub struct SiloHandle {
 }
 
 impl SiloHandle {
-    pub async fn write(&self, batch: WriteBatch) -> TempestResult<()> {
+    pub async fn write(&self, batch: WriteBatch) -> StorageResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(SiloCommand::Write {
@@ -464,7 +467,7 @@ impl SiloHandle {
         rx.await?
     }
 
-    pub(crate) async fn shutdown(&self) -> TempestResult<()> {
+    pub(crate) async fn shutdown(&self) -> StorageResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(SiloCommand::Shutdown { respond_to: tx })
@@ -477,11 +480,11 @@ impl SiloHandle {
 pub enum SiloCommand {
     Write {
         batch: WriteBatch,
-        respond_to: oneshot::Sender<TempestResult<()>>,
+        respond_to: oneshot::Sender<StorageResult<()>>,
     },
     Scan {},
     Shutdown {
-        respond_to: oneshot::Sender<TempestResult<()>>,
+        respond_to: oneshot::Sender<StorageResult<()>>,
     },
 }
 
@@ -489,7 +492,7 @@ pub enum SiloCommand {
 pub enum CommandControlFlow {
     Continue,
     Shutdown {
-        respond_to: oneshot::Sender<TempestResult<()>>,
+        respond_to: oneshot::Sender<StorageResult<()>>,
     },
 }
 
@@ -523,7 +526,7 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
                 let mut worker = SiloWorker { silo, receiver };
                 worker.start().await;
 
-                Ok::<_, TempestError>(())
+                Ok::<_, StorageError>(())
             });
             if let Err(err) = result {
                 error!("silo worker crashed: {}", err);
@@ -573,7 +576,7 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
     }
 
     #[instrument(skip_all)]
-    async fn handle_command(&mut self, cmd: SiloCommand) -> TempestResult<CommandControlFlow> {
+    async fn handle_command(&mut self, cmd: SiloCommand) -> StorageResult<CommandControlFlow> {
         match cmd {
             SiloCommand::Write { batch, respond_to } => {
                 let result = self.silo.write(batch).await;

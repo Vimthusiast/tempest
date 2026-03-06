@@ -4,7 +4,7 @@ use bytes::Bytes;
 
 use crate::base::{Comparer, InternalKey, KeyKind, KeyTrailer, SeqNum};
 
-pub(super) struct MemTableIter<'a, C: Comparer> {
+pub(crate) struct MemTableIter<'a, C: Comparer> {
     inner: std::collections::btree_map::Iter<'a, InternalKey<C>, Bytes>,
 }
 
@@ -17,7 +17,7 @@ impl<'a, C: Comparer> Iterator for MemTableIter<'a, C> {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct MemTable<C: Comparer> {
+pub(crate) struct MemTable<C: Comparer> {
     // TODO: Replace BTreeMap with a Skiplist
     map: BTreeMap<InternalKey<C>, Bytes>,
     approximate_size: usize,
@@ -28,14 +28,14 @@ pub(super) struct MemTable<C: Comparer> {
 }
 
 impl<C: Comparer> MemTable<C> {
-    pub(super) fn new(wal_filenum: u64) -> Self {
+    pub(crate) fn new(wal_filenum: u64) -> Self {
         Self {
             wal_filenum,
             ..Default::default()
         }
     }
 
-    pub(super) fn insert(&mut self, key: InternalKey<C>, value: Bytes) {
+    pub(crate) fn insert(&mut self, key: InternalKey<C>, value: Bytes) {
         trace!(
             key_kind = ?key.trailer().kind(), key_len = key.key().len(),
             key=?key.key(), ?value, seqnum=?key.trailer().seqnum(),
@@ -54,7 +54,7 @@ impl<C: Comparer> MemTable<C> {
         });
     }
 
-    pub(super) fn get(&self, key: &Bytes, snapshot: SeqNum) -> Option<Bytes> {
+    pub(crate) fn get(&self, key: &Bytes, snapshot: SeqNum) -> Option<Bytes> {
         let search_trailer = KeyTrailer::new(snapshot, KeyKind::MAX);
         let search_key = InternalKey::new(key.clone(), search_trailer);
 
@@ -74,40 +74,40 @@ impl<C: Comparer> MemTable<C> {
         None
     }
 
-    pub(super) const fn approximate_size(&self) -> usize {
+    pub(crate) const fn approximate_size(&self) -> usize {
         self.approximate_size
     }
 
     /// Returns the length i.e. the number of entries in this memtable
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
 
     /// Returns the smallest key in this memtable.
-    pub(super) fn min_key(&self) -> Option<&InternalKey<C>> {
+    pub(crate) fn min_key(&self) -> Option<&InternalKey<C>> {
         self.map.keys().next()
     }
 
     /// Returns the largest key in this memtable.
-    pub(super) fn max_key(&self) -> Option<&InternalKey<C>> {
+    pub(crate) fn max_key(&self) -> Option<&InternalKey<C>> {
         self.map.keys().next_back()
     }
 
     /// Returns the smallest seqnum in this memtable.
-    pub(super) const fn min_seqnum(&self) -> Option<SeqNum> {
+    pub(crate) const fn min_seqnum(&self) -> Option<SeqNum> {
         self.min_seqnum
     }
 
     /// Returns the largest seqnum in this memtable.
-    pub(super) const fn max_seqnum(&self) -> Option<SeqNum> {
+    pub(crate) const fn max_seqnum(&self) -> Option<SeqNum> {
         self.max_seqnum
     }
 
-    pub(super) const fn wal_filenum(&self) -> u64 {
+    pub(crate) const fn wal_filenum(&self) -> u64 {
         self.wal_filenum
     }
 
-    pub(super) fn iter(&self) -> MemTableIter<'_, C> {
+    pub(crate) fn iter(&self) -> MemTableIter<'_, C> {
         MemTableIter {
             inner: self.map.iter(),
         }

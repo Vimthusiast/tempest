@@ -2,12 +2,12 @@ use num_enum::TryFromPrimitiveError;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    SiloCommand,
     base::{KeyKind, SeqNum},
-    silo::SiloCommand,
 };
 
 #[derive(Debug, Display, Error, From)]
-pub enum TempestError {
+pub enum StorageError {
     #[from(skip)]
     #[display("sequence number overflow: {_0} exceeds maximum allowed ({}).", SeqNum::MAX.get())]
     SeqNumOverflow(#[error(not(source))] u64),
@@ -34,4 +34,4 @@ pub enum TempestError {
     OneshotChannelRecvError(oneshot::error::RecvError),
 }
 
-pub type TempestResult<T> = Result<T, TempestError>;
+pub type StorageResult<T> = Result<T, StorageError>;

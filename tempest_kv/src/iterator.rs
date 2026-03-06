@@ -9,15 +9,15 @@ use std::{
 
 use bytes::Bytes;
 
-use crate::base::{Comparer, InternalKey, TempestResult};
+use crate::base::{Comparer, InternalKey, StorageResult};
 
-pub trait TempestIterator<'a, C: Comparer> {
+pub trait StorageIterator<'a, C: Comparer> {
     /// Tries to poll the next key-value pair into this iterator.
     /// They can be accessed through the [`key`] and [`value`] methods.
     ///
-    /// [`key`]: TempestIterator::key()
-    /// [`value`]: TempestIterator::value()
-    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>>;
+    /// [`key`]: StorageIterator::key()
+    /// [`value`]: StorageIterator::value()
+    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>>;
 
     /// Returns the last key that was polled.
     fn key(&self) -> Option<&InternalKey<C>>;
@@ -38,7 +38,7 @@ pub trait TempestIterator<'a, C: Comparer> {
 
 pub struct Next<'b, 'a, I, C>
 where
-    I: TempestIterator<'a, C>,
+    I: StorageIterator<'a, C>,
     C: Comparer,
 {
     iter: &'b mut I,
@@ -47,25 +47,28 @@ where
 
 impl<'b, 'a, I, C> Future for Next<'b, 'a, I, C>
 where
-    I: TempestIterator<'a, C>,
+    I: StorageIterator<'a, C>,
     C: Comparer,
 {
-    type Output = TempestResult<Option<()>>;
+    type Output = StorageResult<Option<()>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.iter.poll_next(cx)
     }
 }
 
-/// A [`TempestIterator`] adapter for synchronous, in-memory [`Iterator`]s.
+/// A [`StorageIterator`] adapter for synchronous, in-memory [`Iterator`]s.
 ///
 /// Many data sources in Tempest (e.g. [`MemTable`], [`BlockIterator`]) are inherently
 /// synchronous and never need to return [`Poll::Pending`]. This wrapper allows any
 /// [`Iterator`] over `(InternalKey<C>, Bytes)` pairs to be used wherever a
-/// [`TempestIterator`] is expected, by always returning [`Poll::Ready`].
+/// [`StorageIterator`] is expected, by always returning [`Poll::Ready`].
 ///
 /// The current item is stored internally after each [`Iterator::next`] call and
-/// exposed via the [`TempestIterator::key`] and [`TempestIterator::value`] methods.
+/// exposed via the [`StorageIterator::key`] and [`StorageIterator::value`] methods.
+///
+/// [`MemTable`]: crate::memtable::MemTable
+/// [`BlockIterator`]: crate::sst::block::BlockIterator
 pub struct SyncIterator<C, I>
 where
     C: Comparer,
@@ -73,8 +76,8 @@ where
 {
     /// The underlying synchronous iterator being wrapped.
     inner: I,
-    /// The most recently yielded key-value pair, accessible via [`TempestIterator::key`]
-    /// and [`TempestIterator::value`]. `None` if the iterator has not been polled yet
+    /// The most recently yielded key-value pair, accessible via [`StorageIterator::key`]
+    /// and [`StorageIterator::value`]. `None` if the iterator has not been polled yet
     /// or has been exhausted.
     current: Option<(InternalKey<C>, Bytes)>,
 }
@@ -85,7 +88,7 @@ where
     I: Iterator<Item = (InternalKey<C>, Bytes)>,
 {
     /// Creates a new instance that adapts to `inner` synchronously.
-    pub(super) fn new(inner: I) -> Self {
+    pub(crate) fn new(inner: I) -> Self {
         Self {
             inner,
             current: None,
@@ -107,12 +110,12 @@ where
     }
 }
 
-impl<'a, C, I> TempestIterator<'a, C> for SyncIterator<C, I>
+impl<'a, C, I> StorageIterator<'a, C> for SyncIterator<C, I>
 where
     C: Comparer,
     I: Iterator<Item = (InternalKey<C>, Bytes)>,
 {
-    fn poll_next(&mut self, _cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
+    fn poll_next(&mut self, _cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>> {
         if let Some((k, v)) = self.inner.next() {
             // cheap arc increments
             self.current = Some((k.clone(), v.clone()));
@@ -134,7 +137,7 @@ where
 
 pub struct MergingIteratorHeapEntry<'a, C: Comparer> {
     /// The internal iterator implementation.
-    pub iter: Box<dyn TempestIterator<'a, C> + 'a>,
+    pub iter: Box<dyn StorageIterator<'a, C> + 'a>,
 
     /// Higher ID = newer source. The active memtable has the highest priority, so u64::MAX.
     /// The first immutable memtable gets `u64::MAX-1`, then `-2`, and so on.
@@ -143,7 +146,7 @@ pub struct MergingIteratorHeapEntry<'a, C: Comparer> {
 }
 
 impl<'a, C: Comparer> MergingIteratorHeapEntry<'a, C> {
-    pub fn new<I: TempestIterator<'a, C> + 'a>(iter: I, source_id: u64) -> Self {
+    pub fn new<I: StorageIterator<'a, C> + 'a>(iter: I, source_id: u64) -> Self {
         Self {
             iter: Box::new(iter),
             source_id,
@@ -206,8 +209,8 @@ impl<'a, C: Comparer> MergingIterator<'a, C> {
     }
 }
 
-impl<'a, C: Comparer> TempestIterator<'a, C> for MergingIterator<'a, C> {
-    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
+impl<'a, C: Comparer> StorageIterator<'a, C> for MergingIterator<'a, C> {
+    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>> {
         if let MergingIteratorState::Initializing { ref mut sources } = self.state {
             trace!(sources = sources.len(), "initializing merging iterator");
             let mut i = 0;
@@ -294,7 +297,7 @@ impl<'a, C: Comparer> TempestIterator<'a, C> for MergingIterator<'a, C> {
 
 pub struct DeduplicatingIterator<'a, I, C>
 where
-    I: TempestIterator<'a, C>,
+    I: StorageIterator<'a, C>,
     C: Comparer,
 {
     inner: I,
@@ -304,7 +307,7 @@ where
 
 impl<'a, I, C> DeduplicatingIterator<'a, I, C>
 where
-    I: TempestIterator<'a, C>,
+    I: StorageIterator<'a, C>,
     C: Comparer,
 {
     pub fn new(inner: I) -> Self {
@@ -316,12 +319,12 @@ where
     }
 }
 
-impl<'a, I, C> TempestIterator<'a, C> for DeduplicatingIterator<'a, I, C>
+impl<'a, I, C> StorageIterator<'a, C> for DeduplicatingIterator<'a, I, C>
 where
-    I: TempestIterator<'a, C>,
+    I: StorageIterator<'a, C>,
     C: Comparer,
 {
-    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<TempestResult<Option<()>>> {
+    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>> {
         trace!(inner = type_name::<I>(), "polling deduplicating iterator");
         let c = C::default();
         loop {
@@ -392,8 +395,8 @@ mod tests {
         }
     }
 
-    impl<C: Comparer> TempestIterator<'static, C> for MockIterator<C> {
-        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<TempestResult<Option<()>>> {
+    impl<C: Comparer> StorageIterator<'static, C> for MockIterator<C> {
+        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<StorageResult<Option<()>>> {
             if self.pending_once {
                 self.pending_once = false;
                 // We must wake the context, or the executor hangs forever

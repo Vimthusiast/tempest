@@ -328,7 +328,7 @@ mod tests {
     use super::*;
     use crate::{
         base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
-        silo::config::SiloConfig,
+        config::SiloConfig,
     };
     use bytes::Bytes;
     use tempest_core::test_utils::setup_tracing;

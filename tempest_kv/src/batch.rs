@@ -2,7 +2,7 @@ use bytes::{BufMut, BytesMut};
 use integer_encoding::VarInt;
 use tempest_core::utils::PrettyBytes;
 
-use crate::base::{KeyKind, SeqNum, TempestResult};
+use crate::base::{KeyKind, SeqNum, StorageResult};
 
 /// # Write Batch
 ///
@@ -92,7 +92,7 @@ impl WriteBatch {
         }
     }
 
-    pub fn seqnum(buf: &[u8]) -> TempestResult<SeqNum> {
+    pub fn seqnum(buf: &[u8]) -> StorageResult<SeqNum> {
         let seqnum_raw = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         seqnum_raw.try_into()
     }

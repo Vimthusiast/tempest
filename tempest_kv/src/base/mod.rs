@@ -1,4 +1,4 @@
-//! This module contains base types that are used across Tempest.
+//! This module contains base types for the key-value storage layer.
 //!
 //! - [`SeqNum`]: A sequence number new-type, since they are 56 bits, due to bit-packing.
 //! - [`KeyKind`]: A one-byte key-kind that identifies different operations in our storage layer.
@@ -6,9 +6,7 @@
 //!   lowest byte. Ordering by it therefore prioritizes the sequence number over the kind.
 //! - [`InternalKey`]: This is the key representation that our storage layer uses. It implements
 //!   custom ordering through the [`Comparer`] trait, allowing for key suffixes that encode custom
-//!   data. Tempest uses the suffix for [`HlcTimestamp`]s, to allow ordering of data across silos.
-//!
-//! [`HlcTimestamp`]: crate::ctrl::hlc::HlcTimestamp
+//!   data. Tempest uses the suffix for `HlcTimestamps`, to allow ordering of data across silos.
 
 use std::{cmp, marker::PhantomData};
 
@@ -17,14 +15,14 @@ use bytes::Bytes;
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
+use tempest_core::utils::PrettyBytes;
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U64};
 
 pub mod comparer;
 pub mod error;
 
 pub use comparer::*;
 pub use error::*;
-use tempest_core::utils::PrettyBytes;
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U64};
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.
@@ -91,12 +89,11 @@ impl Default for SeqNum {
 }
 
 impl TryFrom<u64> for SeqNum {
-    // TODO: Use TempestError here
-    type Error = TempestError;
+    type Error = StorageError;
 
     fn try_from(val: u64) -> Result<Self, Self::Error> {
         if val > Self::MAX.get() {
-            return Err(TempestError::SeqNumOverflow(val));
+            return Err(StorageError::SeqNumOverflow(val));
         }
         // SAFETY: Just checked `val` is in valid range
         Ok(unsafe { SeqNum::new_unchecked(val) })

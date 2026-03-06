@@ -598,6 +598,28 @@ dependencies = [
 [[package]]
 name = "tempest"
 version = "0.1.0"
+
+[[package]]
+name = "tempest_core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "bytes",
+ "crc64",
+ "derive_more",
+ "futures",
+ "serde",
+ "tokio",
+ "tokio-uring",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-tree",
+]
+
+[[package]]
+name = "tempest_kv"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -624,24 +646,6 @@ dependencies = [
  "tracing-tree",
  "xxhash-rust",
  "zerocopy",
-]
-
-[[package]]
-name = "tempest_core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bincode",
- "bytes",
- "crc64",
- "derive_more",
- "futures",
- "serde",
- "tokio",
- "tokio-uring",
- "tracing",
- "tracing-subscriber",
- "tracing-tree",
 ]
 
 [[package]]
@@ -941,9 +945,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
-version = "0.7.14"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]

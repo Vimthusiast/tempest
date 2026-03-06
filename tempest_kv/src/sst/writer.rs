@@ -5,16 +5,14 @@ use tempest_core::fio::FioFile;
 use zerocopy::IntoBytes;
 
 use crate::{
-    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, TempestResult},
-    silo::{
-        config::SstConfig,
-        iterator::TempestIterator,
-        sst::{
-            SstFooter,
-            block::{BlockBuilder, BlockStatus},
-            bloom::BloomFilterBuilder,
-            index::IndexBuilder,
-        },
+    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, StorageResult},
+    config::SstConfig,
+    iterator::StorageIterator,
+    sst::{
+        SstFooter,
+        block::{BlockBuilder, BlockStatus},
+        bloom::BloomFilterBuilder,
+        index::IndexBuilder,
     },
 };
 
@@ -54,17 +52,17 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
     pub async fn extend_from_collection<I: IntoIterator<Item = (InternalKey<C>, Bytes)>>(
         &mut self,
         iter: I,
-    ) -> TempestResult<()> {
+    ) -> StorageResult<()> {
         for (key, value) in iter {
             self.write_entry(&key, &value).await?;
         }
         Ok(())
     }
 
-    pub async fn extend_from_stream<'a, I: TempestIterator<'a, C>>(
+    pub async fn extend_from_stream<'a, I: StorageIterator<'a, C>>(
         &mut self,
         mut iter: I,
-    ) -> TempestResult<()> {
+    ) -> StorageResult<()> {
         while let Some(()) = iter.next().await? {
             self.write_entry(iter.key().unwrap(), iter.value().unwrap())
                 .await?;
@@ -72,7 +70,7 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         Ok(())
     }
 
-    pub async fn write_entry(&mut self, key: &InternalKey<C>, value: &Bytes) -> TempestResult<()> {
+    pub async fn write_entry(&mut self, key: &InternalKey<C>, value: &Bytes) -> StorageResult<()> {
         // insert user key into bloom filter
         let c = C::default();
         let (prefix, _) = c.split_up(key.key());
@@ -94,7 +92,7 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         Ok(())
     }
 
-    async fn flush_block(&mut self) -> TempestResult<()> {
+    async fn flush_block(&mut self) -> StorageResult<()> {
         let Some(last_key) = self.last_key.take() else {
             return Ok(());
         };
@@ -118,7 +116,9 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
     }
 
     /// Finalize this SST and return the file size.
-    pub async fn finalize(mut self) -> TempestResult<u64> {
+    pub async fn finalize(mut self) -> StorageResult<u64> {
+        assert_eq!(self.entries_written, self.entries);
+
         // flush any remaining entries in the current block
         self.flush_block().await?;
 

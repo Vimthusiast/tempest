@@ -13,13 +13,11 @@ use tokio_uring::buf::BoundedBuf;
 use tracing::{Instrument, Level};
 
 use crate::{
-    base::{TempestError, TempestResult},
-    silo::{
-        config::WalConfig,
-        wal::format::{
-            SILO_WAL_DIR_NAME, SILO_WAL_HEADER_SIZE, SILO_WAL_RECORD_PREFIX_SIZE, WalHeader,
-            WalRecordPrefix,
-        },
+    base::{StorageError, StorageResult},
+    config::WalConfig,
+    wal::format::{
+        SILO_WAL_DIR_NAME, SILO_WAL_HEADER_SIZE, SILO_WAL_RECORD_PREFIX_SIZE, WalHeader,
+        WalRecordPrefix,
     },
 };
 
@@ -62,7 +60,7 @@ impl<F: FioFile> WalFileReader<F> {
         }
     }
 
-    async fn next(&mut self) -> Option<TempestResult<BytesMut>> {
+    async fn next(&mut self) -> Option<StorageResult<BytesMut>> {
         if self.filepos >= self.endpos || self.had_error {
             return None;
         }
@@ -92,7 +90,7 @@ impl<F: FioFile> WalFileReader<F> {
         file: &F,
         filepos: u64,
         endpos: u64,
-    ) -> (TempestResult<(BytesMut, u64)>, BytesMut) {
+    ) -> (StorageResult<(BytesMut, u64)>, BytesMut) {
         debug!(filepos=?HexU64(filepos), "reading from write-ahead log");
 
         let mut current_pos = filepos;
@@ -160,7 +158,7 @@ pub struct WalRecoveryReader<F: FioFS> {
 impl<F: FioFS> WalRecoveryReader<F> {
     // TODO: Take in list of filenums to recover from manifest
     #[instrument(skip_all)]
-    async fn recover(fs: F, dir: impl AsRef<Path>, files: &[u64]) -> TempestResult<Self> {
+    async fn recover(fs: F, dir: impl AsRef<Path>, files: &[u64]) -> StorageResult<Self> {
         let dir = dir.as_ref();
         info!(?dir, "creating wal recovery reader");
         // TODO: use injected files list instead of searching
@@ -207,7 +205,7 @@ impl<F: FioFS> WalRecoveryReader<F> {
                         };
                         debug!(filenum = header.filenum, "decoded header");
 
-                        Ok::<_, TempestError>((header, file))
+                        Ok::<_, StorageError>((header, file))
                     }
                     .instrument(span)
                 })
@@ -236,7 +234,7 @@ impl<F: FioFS> WalRecoveryReader<F> {
         }
     }
 
-    pub async fn next(&mut self) -> Option<TempestResult<BytesMut>> {
+    pub async fn next(&mut self) -> Option<StorageResult<BytesMut>> {
         loop {
             // check if we reached end
             if self.pos >= self.sources.len() {
@@ -301,7 +299,7 @@ impl<F: FioFS> SiloWal<F> {
         filenum: u64,
         files: &[u64],
         config: WalConfig,
-    ) -> TempestResult<(Self, WalRecoveryReader<F>)> {
+    ) -> StorageResult<(Self, WalRecoveryReader<F>)> {
         let wal_dir = silo_dir.join(SILO_WAL_DIR_NAME);
         info!("initializing silo write-ahead log at {:?}", wal_dir);
         fs.create_dir_all(&wal_dir).await?;
@@ -362,7 +360,7 @@ impl<F: FioFS> SiloWal<F> {
     /// Note that, while we do write to the file, we don't `fsync` in any way, so the caller is
     /// responsible. Returns the current status of this WAL.
     #[instrument(skip_all, level = "debug")]
-    pub(crate) async fn append(&mut self, data: Bytes) -> TempestResult<WalFlushRequired> {
+    pub(crate) async fn append(&mut self, data: Bytes) -> StorageResult<WalFlushRequired> {
         let mut filepos = self.filepos;
         debug!(
             data_size=?ByteSize(data.len() as u64), filepos=?HexU64(filepos),
@@ -416,12 +414,12 @@ impl<F: FioFS> SiloWal<F> {
     }
 
     /// Executes a flush of the WAL and returns the inner status from that flush.
-    pub(crate) async fn flush(&mut self, flush: WalFlushRequired) -> TempestResult<WalStatus> {
+    pub(crate) async fn flush(&mut self, flush: WalFlushRequired) -> StorageResult<WalStatus> {
         self.current_file.sync_all().await?;
         Ok(flush.0)
     }
 
-    pub(super) fn current_filenum(&self) -> u64 {
+    pub(crate) fn current_filenum(&self) -> u64 {
         self.filenum
     }
 }
