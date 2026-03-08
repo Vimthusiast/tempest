@@ -9,8 +9,7 @@ application types.
 > [!IMPORTANT]
 > This is a learning project under active development. I'm 16, still in high school, and built this
 > after going down a rabbit hole reading about how [CockroachDB] handles relational data on top of a
-> flat key-value store ([Pebble]). It's ambitious, possibly foolish, and I'm enjoying every second.
-> Take any `Promise` here with caution - it may yet be `reject()`ed ??
+> flat key-value store ([Pebble]).
 
 ---
 
