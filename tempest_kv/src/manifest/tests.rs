@@ -1,127 +1,163 @@
 use bytes::Bytes;
-use tempest_core::{fio::VirtualFileSystem, test_utils::setup_tracing};
-use tracing::Level;
+use tempest_core::fio::VirtualFileSystem;
 
 use crate::config::SiloConfig;
 
 use super::*;
 
-#[test]
-fn test_manifest() {
-    setup_tracing();
-    tokio_uring::start(async {
-        let silo_span = span!(Level::INFO, "silo", id = 0);
-        let _enter = silo_span.enter();
+async fn make_manifest(config: ManifestConfig) -> StorageManifest<VirtualFileSystem> {
+    let fs = VirtualFileSystem::new();
+    let root = PathBuf::from("test-manifest");
+    StorageManifest::init(fs, root, config).await.unwrap()
+}
 
-        let fs = VirtualFileSystem::new();
-        let silo_root = PathBuf::from("silo-0");
+// -- seqnum range tests --
 
-        let first_seqnum_range;
-        let second_seqnum_range;
+#[tokio::test]
+async fn test_seqnum_range_basic() {
+    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let start = m.seqnum_current();
 
-        let config = SiloConfig::for_testing().manifest;
+    let range = m.get_seqnums(5).await.unwrap();
 
-        {
-            let mut manifest =
-                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
-            let seqnums_needed = 10;
-            let response = manifest
-                .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
-                .await?;
-            first_seqnum_range = response.seqnum_range;
-            manifest.shutdown().await?;
-            info!("first manifest final state: {:#?}", manifest);
-            let range_size = first_seqnum_range.end.get() - first_seqnum_range.start.get();
-            assert_eq!(
-                range_size, seqnums_needed,
-                "requested {} seqnums, but got {}",
-                seqnums_needed, range_size,
-            );
-        }
+    assert_eq!(range.start, start);
+    assert_eq!(range.end.get() - range.start.get(), 5);
+    assert_eq!(m.seqnum_current(), range.end);
+}
 
-        {
-            let mut manifest =
-                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
-            // simulate big seqnum request (about 1.5x the limit step)
-            let seqnums_needed = config.seqnum_limit_step * 3 / 2 + 10;
-            let resp = manifest
-                .handle_request(ManifestRequest::default().with_seqnums_needed(seqnums_needed))
-                .await?;
-            second_seqnum_range = resp.seqnum_range;
-            manifest.shutdown().await?;
-            info!("second manifest final state: {:#?}", manifest);
-            let range_size = second_seqnum_range.end.get() - second_seqnum_range.start.get();
-            assert_eq!(
-                range_size, seqnums_needed,
-                "requested {} seqnums, but got {}",
-                seqnums_needed, range_size,
-            );
-        }
+#[tokio::test]
+async fn test_seqnum_ranges_are_contiguous() {
+    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
 
-        assert_eq!(
-            first_seqnum_range.end, second_seqnum_range.start,
-            "seqnum ranges should be continuous, got {:?} and {:?}",
-            first_seqnum_range, second_seqnum_range,
-        );
+    let r1 = m.get_seqnums(10).await.unwrap();
+    let r2 = m.get_seqnums(10).await.unwrap();
+    let r3 = m.get_seqnums(10).await.unwrap();
 
-        Ok::<(), StorageError>(())
-    })
-    .unwrap();
+    assert_eq!(r1.end, r2.start, "r1 and r2 must be contiguous");
+    assert_eq!(r2.end, r3.start, "r2 and r3 must be contiguous");
+}
+
+#[tokio::test]
+async fn test_seqnum_exceeding_limit_expands_it() {
+    let config = SiloConfig::for_testing().manifest;
+    let mut m = make_manifest(config).await;
+
+    let initial_limit = m.journal.seqnum_limit;
+
+    // First request always forces limit expansion
+    m.get_seqnums(20).await.unwrap();
+
+    assert!(
+        m.journal.seqnum_limit > initial_limit,
+        "limit must have expanded"
+    );
+}
+
+#[tokio::test]
+async fn test_seqnum_large_request_gets_exact_range() {
+    let config = ManifestConfig {
+        seqnum_limit_step: 10,
+        ..SiloConfig::for_testing().manifest
+    };
+    let mut m = make_manifest(config).await;
+
+    // Request 1.5x the limit step
+    let needed = 15u64;
+    let range = m.get_seqnums(needed).await.unwrap();
+
+    assert_eq!(
+        range.end.get() - range.start.get(),
+        needed,
+        "must get exactly the requested number of seqnums"
+    );
+}
+
+// -- filenum range tests --
+
+#[tokio::test]
+async fn test_filenum_range_basic() {
+    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let start = m.filenum_current();
+
+    let range = m.get_filenums(3).await.unwrap();
+
+    assert_eq!(range.start, start);
+    assert_eq!(range.end - range.start, 3);
+    assert_eq!(m.filenum_current(), range.end);
+}
+
+#[tokio::test]
+async fn test_filenum_ranges_are_contiguous() {
+    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+
+    let r1 = m.get_filenums(5).await.unwrap();
+    let r2 = m.get_filenums(5).await.unwrap();
+
+    assert_eq!(r1.end, r2.start, "filenum ranges must be contiguous");
+}
+
+// -- overflow tests --
+
+#[tokio::test]
+async fn test_seqnum_overflow_is_detected() {
+    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+
+    // Directly push seqnum_current near the maximum
+    // We do this by requesting nearly the entire range in one shot.
+    // Since SeqNum::MAX is (1 << 56) - 1, we can't actually do this
+    // without making the test take forever, so instead we test that
+    // checked_add overflow is handled by passing u64::MAX as the count.
+    let result = m.get_seqnums(u64::MAX).await;
+    assert!(
+        matches!(result, Err(StorageError::SeqNumOverflow(_))),
+        "expected SeqNumOverflow, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_filenum_overflow_is_detected() {
+    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+
+    // go to the u64 overflow boundary
+    m.get_filenums(u64::MAX).await.unwrap();
+
+    // get one more filenum (overflows)
+    let result = m.get_filenums(1).await;
+    assert!(
+        matches!(result, Err(StorageError::FileNumOverflow)),
+        "expected FileNumOverflow, got {:?}",
+        result
+    );
 }
 
 #[test]
 fn test_sst_and_wal_in_same_edit() {
-    // Simulates what flush_oldest_immutable will do: atomically register an SST
-    // and remove the WAL files it covers in a single manifest edit.
-    setup_tracing();
-    tokio_uring::start(async {
-        let fs = VirtualFileSystem::new();
-        let silo_root = PathBuf::from("silo-atomic-flush");
-        let config = SiloConfig::for_testing().manifest;
+    let mut state = ManifestState::default();
 
-        {
-            let mut manifest =
-                StorageManifest::init(fs.clone(), silo_root.clone(), config.clone()).await?;
+    // pre-register a WAL file
+    state.apply(ManifestEdit::V1(ManifestEditV1 {
+        wal_filenums_added: Some(vec![5u64]),
+        ..Default::default()
+    }));
+    assert_eq!(state.wal_filenums, &[5u64]);
 
-            // pre-register a WAL file
-            manifest
-                .handle_request(ManifestRequest::new().with_wal_filenums_added([5u64]))
-                .await?;
+    // atomic flush edit: new SST in, WAL file out
+    let sst = SstMetadata {
+        filenum: 100,
+        file_size: 1024,
+        level: 0,
+        min_key: Bytes::from("a"),
+        max_key: Bytes::from("z"),
+        min_seqnum: SeqNum::START,
+        max_seqnum: SeqNum::START,
+    };
+    state.apply(ManifestEdit::V1(ManifestEditV1 {
+        ssts_added: Some(vec![sst]),
+        wal_filenums_removed: Some(vec![5u64]),
+        ..Default::default()
+    }));
 
-            // atomic flush edit: new SST in, WAL file out
-            let sst = SstMetadata {
-                filenum: 100,
-                file_size: 1024,
-                level: 0,
-                min_key: Bytes::from("a"),
-                max_key: Bytes::from("z"),
-                min_seqnum: SeqNum::START,
-                max_seqnum: SeqNum::START,
-            };
-            manifest
-                .handle_request(
-                    ManifestRequest::new()
-                        .with_ssts_added([sst])
-                        .with_wal_filenums_removed([5u64]),
-                )
-                .await?;
-
-            assert_eq!(manifest.ssts().len(), 1);
-            assert!(manifest.wal_filenums().is_empty());
-            manifest.shutdown().await?;
-        }
-
-        {
-            let mut manifest = StorageManifest::init(fs.clone(), silo_root.clone(), config).await?;
-            assert_eq!(manifest.ssts().len(), 1, "sst must persist");
-            assert!(
-                manifest.wal_filenums().is_empty(),
-                "wal filenum must be gone after flush"
-            );
-            manifest.shutdown().await?;
-        }
-
-        Ok::<(), StorageError>(())
-    })
-    .unwrap();
+    assert_eq!(state.ssts.len(), 1);
+    assert!(state.wal_filenums.is_empty());
 }

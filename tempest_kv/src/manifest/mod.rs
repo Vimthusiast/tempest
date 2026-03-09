@@ -278,7 +278,7 @@ impl<F: FioFS> StorageManifest<F> {
 
         let range = start..end;
         if end > self.journal.filenum_limit {
-            let new_limit = end + self.config.filenum_limit_step;
+            let new_limit = end.saturating_add(self.config.filenum_limit_step);
             Ok((range, Some(new_limit)))
         } else {
             Ok((range, None))
@@ -301,7 +301,7 @@ impl<F: FioFS> StorageManifest<F> {
         let range = start..end;
 
         if end > self.journal.seqnum_limit {
-            let raw_limit = end.get() + self.config.seqnum_limit_step;
+            let raw_limit = end.get().saturating_add(self.config.seqnum_limit_step);
             let new_limit = SeqNum::try_from(std::cmp::min(raw_limit, SeqNum::MAX.get()))
                 .expect("handled by cmp::min");
             Ok((range, Some(new_limit)))
