@@ -5,14 +5,14 @@
 //! has to account for, depending on the users clock implementation for retrieving milliseconds.
 
 // => We could try persisting the timestamp every so often to avoid going back in time, like with
-// the sequence numbers in the [`SiloManifest`] implementation (range allocations).
+// the sequence numbers in the [`StorageManifest`] implementation (range allocations).
 
 /// # Hybrid Logical Clock Timestamp
 ///
-/// Tempest uses these to order data within different silos, using a custom [`Comparer`]
-/// implementation.
+/// Tempest uses these to order data within different storages, using a custom [`Comparer`]
+/// implementation, by storing the HLC in the key-suffix.
 ///
-/// [`Comparer`]: crate::base::comparer::Comparer
+/// [`Comparer`]: tempest_kv::base::comparer::Comparer
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct HlcTimestamp(
     /// Packs the millis in the upper 48 bits and the counter in the lower 16 bits.

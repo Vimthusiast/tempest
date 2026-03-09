@@ -103,4 +103,8 @@ impl FioFS for UringFileSystem {
 
         Ok(stream.boxed())
     }
+
+    async fn remove_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        tokio_uring::fs::remove_file(path).await
+    }
 }

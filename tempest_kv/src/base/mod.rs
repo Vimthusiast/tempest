@@ -6,7 +6,7 @@
 //!   lowest byte. Ordering by it therefore prioritizes the sequence number over the kind.
 //! - [`InternalKey`]: This is the key representation that our storage layer uses. It implements
 //!   custom ordering through the [`Comparer`] trait, allowing for key suffixes that encode custom
-//!   data. Tempest uses the suffix for `HlcTimestamps`, to allow ordering of data across silos.
+//!   data. Tempest uses the suffix for `HlcTimestamps`, to allow ordering of data across storages.
 
 use std::{cmp, marker::PhantomData};
 
@@ -26,15 +26,11 @@ pub use error::*;
 
 /// Magic number for the manifest files, as a first check for file validation.
 /// Stored in the footer, at the end of an `*.sst` file.
-pub const SILO_SST_MAGICNUM: &[u8; 8] = b"TMPS_SST";
+pub const SST_MAGICNUM: &[u8; 8] = b"TMPS_SST";
 
-/// Magic number for the silo manifest files, as a first check for file validation.
-/// Stored in the header, at the start of a `MANIFEST-*` file.
-pub const SILO_MANIFEST_MAGICNUM: &[u8; 8] = b"TMPS_MAN";
-
-/// Magic number for the silo write-ahead log files, as a first check for file validation.
+/// Magic number for the storages write-ahead log files, as a first check for file validation.
 /// Stored in the header, at the start of a `*.log` file.
-pub const SILO_WAL_MAGICNUM: &[u8; 8] = b"TMPS_WAL";
+pub const WAL_MAGICNUM: &[u8; 8] = b"TMPS_WAL";
 
 /// The crate wide used [`bincode`] encoding options.
 #[doc(hidden)]

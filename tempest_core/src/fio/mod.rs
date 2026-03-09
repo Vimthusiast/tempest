@@ -132,4 +132,6 @@ pub trait FioFS: Send + Sync + 'static + Clone {
         &self,
         path: &Path,
     ) -> io::Result<BoxStream<'static, io::Result<FioDirEntry>>>;
+
+    async fn remove_file(&self, path: impl AsRef<Path>) -> io::Result<()>;
 }

@@ -1,11 +1,12 @@
 use std::marker::PhantomData;
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use tempest_core::fio::FioFile;
 use zerocopy::IntoBytes;
 
 use crate::{
-    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, StorageResult},
+    base::{Comparer, InternalKey, SST_MAGICNUM, SeqNum, StorageResult},
     config::SstConfig,
     iterator::StorageIterator,
     sst::{
@@ -16,40 +17,68 @@ use crate::{
     },
 };
 
-pub struct SstWriter<F: FioFile, C: Comparer> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SstWriterStats {
+    pub(crate) file_size: u64,
+    pub(crate) entry_count: u64,
+    pub(crate) min_key: Bytes,
+    pub(crate) max_key: Bytes,
+    pub(crate) min_seqnum: SeqNum,
+    pub(crate) max_seqnum: SeqNum,
+}
+
+impl Default for SstWriterStats {
+    fn default() -> Self {
+        Self {
+            file_size: 0,
+            entry_count: 0,
+            min_key: Bytes::new(),
+            max_key: Bytes::new(),
+            // NB: will automatically fall back to the minimum on the first write
+            min_seqnum: SeqNum::MAX,
+            // NB: will automatically fall back to the maximum on the first write
+            max_seqnum: SeqNum::MIN,
+        }
+    }
+}
+
+pub(crate) struct SstWriter<F: FioFile, C: Comparer> {
     file: F,
     filepos: u64,
-    entries_written: u64,
-    entries: u64,
+    entry_estimate: u64,
     block_builder: BlockBuilder,
     index_builder: IndexBuilder,
     bloom_builder: BloomFilterBuilder,
     last_key: Option<InternalKey<C>>,
     config: SstConfig,
+    stats: SstWriterStats,
     _marker: PhantomData<C>,
 }
 
 impl<F: FioFile, C: Comparer> SstWriter<F, C> {
-    /// Create a new writer for a total of `n` entries.
-    pub fn new(file: F, entries: usize, config: SstConfig) -> Self {
+    /// Create a new writer for a maximum of `entry_estimate` key-value pairs.
+    pub(crate) fn new(file: F, entry_estimate: usize, config: SstConfig) -> Self {
         Self {
             file,
             filepos: 0,
-            entries: entries as u64,
-            entries_written: 0,
+            entry_estimate: entry_estimate as u64,
             block_builder: BlockBuilder::new(
                 config.block_target_size,
                 config.block_restart_interval,
             ),
             index_builder: IndexBuilder::new(),
-            bloom_builder: BloomFilterBuilder::new(entries, config.bloom_false_positive_rate),
+            bloom_builder: BloomFilterBuilder::new(
+                entry_estimate,
+                config.bloom_false_positive_rate,
+            ),
             last_key: None,
             config,
+            stats: SstWriterStats::default(),
             _marker: PhantomData,
         }
     }
 
-    pub async fn extend_from_collection<I: IntoIterator<Item = (InternalKey<C>, Bytes)>>(
+    pub(crate) async fn extend_from_collection<I: IntoIterator<Item = (InternalKey<C>, Bytes)>>(
         &mut self,
         iter: I,
     ) -> StorageResult<()> {
@@ -59,7 +88,7 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         Ok(())
     }
 
-    pub async fn extend_from_stream<'a, I: StorageIterator<'a, C>>(
+    pub(crate) async fn extend_from_stream<'a, I: StorageIterator<'a, C>>(
         &mut self,
         mut iter: I,
     ) -> StorageResult<()> {
@@ -70,7 +99,11 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         Ok(())
     }
 
-    pub async fn write_entry(&mut self, key: &InternalKey<C>, value: &Bytes) -> StorageResult<()> {
+    pub(crate) async fn write_entry(
+        &mut self,
+        key: &InternalKey<C>,
+        value: &Bytes,
+    ) -> StorageResult<()> {
         // insert user key into bloom filter
         let c = C::default();
         let (prefix, _) = c.split_up(key.key());
@@ -88,7 +121,16 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
             BlockStatus::Full => self.flush_block().await?,
         }
 
-        self.entries_written += 1;
+        self.stats.entry_count += 1;
+        let seqnum = key.trailer().seqnum();
+        self.stats.min_seqnum = self.stats.min_seqnum.min(seqnum);
+        self.stats.max_seqnum = self.stats.max_seqnum.max(seqnum);
+        if self.stats.entry_count == 1 {
+            // first key written is min
+            self.stats.min_key = key.key().clone();
+        }
+        self.stats.max_key = key.key().clone(); // last key written is max
+
         Ok(())
     }
 
@@ -116,8 +158,17 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
     }
 
     /// Finalize this SST and return the file size.
-    pub async fn finalize(mut self) -> StorageResult<u64> {
-        assert_eq!(self.entries_written, self.entries);
+    pub(crate) async fn finalize(mut self) -> StorageResult<SstWriterStats> {
+        assert!(self.stats.entry_count <= self.entry_estimate);
+        assert_ne!(self.stats.entry_count, 0);
+        if self.stats.entry_count < self.entry_estimate {
+            trace!(
+                overestimation = self.entry_estimate - self.stats.entry_count,
+                entry_count = self.stats.entry_count,
+                entry_estimate = self.entry_estimate,
+                "overestimated the number of entries"
+            );
+        }
 
         // flush any remaining entries in the current block
         self.flush_block().await?;
@@ -141,7 +192,7 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
 
         // write footer
         let footer = SstFooter {
-            magic: *SILO_SST_MAGICNUM,
+            magic: *SST_MAGICNUM,
             bloom_offset: bloom_offset.into(),
             bloom_size: bloom_size.into(),
             bloom_footer: bloom.footer(),
@@ -154,8 +205,9 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
             .await;
         res?;
         self.filepos += size_of::<SstFooter>() as u64;
+        self.stats.file_size = self.filepos;
 
         self.file.sync_all().await?;
-        Ok(self.filepos)
+        Ok(self.stats)
     }
 }

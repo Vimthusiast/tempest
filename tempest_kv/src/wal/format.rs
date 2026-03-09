@@ -3,10 +3,10 @@ use std::io;
 use crc64::crc64;
 use serde::{Deserialize, Serialize};
 
-use crate::base::SILO_WAL_MAGICNUM;
+use crate::base::WAL_MAGICNUM as WAL_MAGICNUM;
 
 // -- constants --
-pub(crate) const SILO_WAL_DIR_NAME: &str = "wal";
+pub(crate) const WAL_DIR: &str = "wal";
 pub(crate) const SILO_WAL_HEADER_SIZE: usize = 16;
 pub(crate) const SILO_WAL_RECORD_PREFIX_SIZE: usize = 12;
 
@@ -24,19 +24,19 @@ impl WalHeader {
     #[inline]
     pub(crate) fn encode(&self) -> [u8; SILO_WAL_HEADER_SIZE] {
         let mut buf = [0u8; SILO_WAL_HEADER_SIZE];
-        buf[0..8].copy_from_slice(SILO_WAL_MAGICNUM);
+        buf[0..8].copy_from_slice(WAL_MAGICNUM);
         buf[8..16].copy_from_slice(&self.filenum.to_le_bytes());
         buf
     }
 
     pub(crate) fn decode(buf: [u8; SILO_WAL_HEADER_SIZE]) -> io::Result<Self> {
         let magic_bytes = &buf[0..8];
-        if magic_bytes != SILO_WAL_MAGICNUM {
+        if magic_bytes != WAL_MAGICNUM {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "invalid magic number: not a write-ahead log file. expected {:?} but got {:?}.",
-                    SILO_WAL_MAGICNUM, magic_bytes
+                    WAL_MAGICNUM, magic_bytes
                 ),
             ));
         }

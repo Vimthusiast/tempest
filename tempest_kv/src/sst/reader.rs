@@ -12,7 +12,7 @@ use tokio_uring::buf::BoundedBuf;
 use zerocopy::FromBytes;
 
 use crate::{
-    base::{Comparer, InternalKey, SILO_SST_MAGICNUM, StorageResult},
+    base::{Comparer, InternalKey, SST_MAGICNUM, StorageResult},
     iterator::StorageIterator,
     sst::{
         SstFooter,
@@ -120,12 +120,12 @@ impl<F: FioFile, C: Comparer> SstReader<F, C> {
         let footer = SstFooter::read_from_bytes(&footer_buf).unwrap();
 
         // verify magic
-        if &footer.magic != SILO_SST_MAGICNUM {
+        if &footer.magic != SST_MAGICNUM {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "invalid magic number: not an sst file. expected {:?} but got {:?}.",
-                    SILO_SST_MAGICNUM, footer.magic
+                    SST_MAGICNUM, footer.magic
                 ),
             )
             .into());

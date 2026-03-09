@@ -13,6 +13,7 @@ use tempest_core::{
 use crate::{
     base::{SeqNum, StorageError, StorageResult},
     config::ManifestConfig,
+    sst::writer::SstWriterStats,
 };
 
 #[cfg(test)]
@@ -28,20 +29,20 @@ mod tests;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SstMetadata {
     pub(crate) filenum: u64,
-    pub(crate) file_size: u64,
-
+    // TODO: leveled compaction strategy
     pub(crate) level: u8,
-
-    pub(crate) min_key: Bytes,
-    pub(crate) max_key: Bytes,
-
-    pub(crate) min_seqnum: SeqNum,
-    pub(crate) max_seqnum: SeqNum,
+    pub(crate) stats: SstWriterStats,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SstDeletion {
     pub(crate) filenum: u64,
+}
+
+impl SstDeletion {
+    pub(crate) fn new(filenum: u64) -> Self {
+        Self { filenum }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -80,15 +81,6 @@ impl ManifestEdit {
             ManifestEdit::V1(edit) => edit,
         }
     }
-}
-
-pub(crate) fn get_sst_path(silo_root: impl AsRef<Path>, level: u8, filenum: u64) -> PathBuf {
-    silo_root
-        .as_ref()
-        .join("ssts")
-        // TODO: should we have ssts in a fs level based hierarchy even?
-        .join(format!("l-{}", level))
-        .join(format!("{}.sst", filenum))
 }
 
 #[derive(Debug, Default)]
@@ -137,6 +129,11 @@ impl ManifestRequest {
     }
 }
 
+#[derive(Debug)]
+#[debug(
+    "ManifestResponse(seqnums=[{}..{}] filenums=[{}..{}])",
+    seqnum_range.start.get(), seqnum_range.end.get(), filenum_range.start, filenum_range.end,
+)]
 pub(crate) struct ManifestResponse {
     pub seqnum_range: std::ops::Range<SeqNum>,
     pub filenum_range: std::ops::Range<u64>,
@@ -201,7 +198,7 @@ impl Replayable for ManifestState {
     }
 }
 
-/// Manages reads and writes to the manifest of a silo.
+/// Manages reads and writes to the manifest.
 #[derive(Debug)]
 pub(crate) struct StorageManifest<F: FioFS> {
     /// The root path of the silo this manifest belongs to.
@@ -236,6 +233,7 @@ impl<F: FioFS> StorageManifest<F> {
         let journal =
             Journal::<ManifestState, _>::open(fs, manifest_dir, config.journal_config()).await?;
 
+        info!(state=?journal.state(), "finished initializing manifest");
         Ok(Self {
             silo_root,
             seqnum_current: journal.seqnum_limit,
@@ -310,7 +308,7 @@ impl<F: FioFS> StorageManifest<F> {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), level = "debug")]
     pub(crate) async fn handle_request(
         &mut self,
         req: ManifestRequest,
@@ -352,6 +350,7 @@ impl<F: FioFS> StorageManifest<F> {
         }
 
         if requires_write {
+            debug!("requires write");
             // write edit to disk
             let edit = ManifestEdit::V1(edit);
             self.journal.append(edit).await?;
@@ -361,10 +360,13 @@ impl<F: FioFS> StorageManifest<F> {
         self.seqnum_current = seqnum_range.end;
         self.filenum_current = filenum_range.end;
 
-        Ok(ManifestResponse {
+        let response = ManifestResponse {
             seqnum_range,
             filenum_range,
-        })
+        };
+
+        debug!(?response, "finished handling manifest request");
+        Ok(response)
     }
 
     pub(crate) async fn get_seqnums(&mut self, n: u64) -> StorageResult<std::ops::Range<SeqNum>> {
@@ -414,13 +416,17 @@ impl<F: FioFS> StorageManifest<F> {
         &self.journal.wal_filenums
     }
 
+    pub(crate) fn min_wal_filenum(&self) -> Option<u64> {
+        self.journal.wal_filenums.iter().min().copied()
+    }
+
     pub(crate) fn max_flushed_seqnum(&self) -> SeqNum {
         // TODO: We should track the max flushed seqnum to prevent this calculation, but this is
         // easier and cheap enough for now. It's still O(N) though...
         self.journal
             .ssts
             .iter()
-            .map(|s| s.max_seqnum)
+            .map(|s| s.stats.max_seqnum)
             .max()
             .unwrap_or(SeqNum::ZERO)
     }

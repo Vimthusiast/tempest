@@ -21,7 +21,7 @@
 //! ## Key Range Encoding
 //!
 //! Lock targets are expressed as `[start, end)` byte ranges over the same keyspace used by the
-//! silos. This means:
+//! storages. This means:
 //!
 //! ```not_rust
 //! Database lock:  [db | MIN          ]  ..  [db | MAX          ]

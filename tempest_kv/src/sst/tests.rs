@@ -6,7 +6,7 @@ use tempest_core::{
 
 use crate::{
     base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
-    config::SiloConfig,
+    config::StorageConfig,
     iterator::StorageIterator,
     sst::{reader::SstReader, writer::SstWriter},
 };
@@ -34,7 +34,7 @@ async fn build_sst(entries: &[(&str, u64, &str)]) -> (VirtualFileSystem, String)
         .await
         .unwrap();
 
-    let config = SiloConfig::for_testing().sst;
+    let config = StorageConfig::for_testing().sst;
     let mut writer = SstWriter::<_, DefaultComparer>::new(file, entries.len(), config);
     for (key, seqnum, value) in entries {
         let k = InternalKey::new(
@@ -210,7 +210,7 @@ async fn test_delete_tombstone_key() {
         .await
         .unwrap();
 
-    let config = SiloConfig::for_testing().sst;
+    let config = StorageConfig::for_testing().sst;
     let mut writer = SstWriter::<_, DefaultComparer>::new(file, 2, config);
     // tombstone - delete marker with higher seqnum
     // NB: higher seqnum comes first!
@@ -343,7 +343,7 @@ async fn test_iterator_trailers_preserved() {
         .await
         .unwrap();
 
-    let config = SiloConfig::for_testing().sst;
+    let config = StorageConfig::for_testing().sst;
     let mut writer = SstWriter::<_, DefaultComparer>::new(file, 2, config);
     writer
         .write_entry(&make_delete_key("apple", 2).byte_key(), &Bytes::new())

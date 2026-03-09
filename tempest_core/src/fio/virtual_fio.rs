@@ -280,6 +280,16 @@ impl FioFS for VirtualFileSystem {
 
         Ok(futures::stream::iter(entries.into_values().map(Ok)).boxed())
     }
+
+    async fn remove_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        let normalized = Self::normalize(path);
+        self.files
+            .write()
+            .await
+            .remove(&normalized)
+            .map(|_| ())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "file not found"))
+    }
 }
 
 #[cfg(test)]

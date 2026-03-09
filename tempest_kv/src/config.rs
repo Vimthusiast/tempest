@@ -79,16 +79,31 @@ impl Default for SstConfig {
     }
 }
 
-/// Configuration for a storage silo and all its sub-components.
+#[derive(Debug, Clone)]
+pub struct CompactionConfig {
+    /// The number of SST files that may accumulate before a compaction is triggered.
+    pub l0_file_threshold: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            l0_file_threshold: 4,
+        }
+    }
+}
+
+/// Configuration for this storage and all its sub-components.
 #[derive(Debug, Clone, Default)]
-pub struct SiloConfig {
+pub struct StorageConfig {
     pub memtable: MemTableConfig,
     pub wal: WalConfig,
     pub manifest: ManifestConfig,
     pub sst: SstConfig,
+    pub compaction: CompactionConfig,
 }
 
-impl SiloConfig {
+impl StorageConfig {
     /// A config tuned for fast testing.
     ///
     /// - **memtable:** Tiny thresholds force frequent flushes/compactions.

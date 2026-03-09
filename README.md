@@ -157,11 +157,11 @@ select id, email from users order by email;
 
 ## Current Progress
 
-- **Storage Silos** - Shared-nothing architecture using `io_uring` for async I/O without
+- **Storage Engine** - Shared-nothing architecture using `io_uring` for async I/O without
   synchronization primitives. Inspired by [ScyllaDB] and [TigerBeetle].
 - **LSM-Tree Storage** - Manifest, MemTable, and WAL complete. SST implementation in progress.
-- **Hybrid Logical Clocks (HLC)** - Causality tracking across distributed silos, encoded
-  directly into key suffixes for efficient ordering at the storage layer.
+- **Hybrid Logical Clocks (HLC)** - Causality tracking across distributed storages, encoded
+  directly into key suffixes for efficient ordering at the storage layer. Not yet implemented.
 - **Iterator Layer** - k-way merge iterators for the read path, collecting across MemTable
   and SST sources.
 - **TQL** - Design in progress. Parser and type system not yet implemented.

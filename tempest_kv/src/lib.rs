@@ -1,14 +1,3 @@
-//! # Silo Module
-//!
-//! This module contains the code for our **storage silos**.
-//!
-//! ## What are silos
-//!
-//! Tempest is designed with the shared-nothing approach, where we try to avoid having any
-//! resources requiring multi-thread synchronization primitives. This improves overall
-//! **performance** and allows us to utilize certain Linux kernel features, such as **io_uring**,
-//! which is bound to be used on one thread by implementation, i.e. most types are !Send.
-
 use std::{path::PathBuf, sync::Arc, thread};
 
 use crate::{
@@ -17,15 +6,15 @@ use crate::{
         StorageResult,
     },
     batch::WriteBatch,
-    config::SiloConfig,
+    config::StorageConfig,
     iterator::{DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry, SyncIterator},
-    manifest::{ManifestRequest, StorageManifest, SstMetadata, get_sst_path},
+    manifest::{ManifestRequest, StorageManifest},
     memtable::MemTable,
-    sst::{reader::SstReader, writer::SstWriter},
-    wal::SiloWal,
+    sst::{SST_DIR, get_sst_path, reader::SstReader},
+    wal::{Wal, WalStatus},
 };
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use integer_encoding::VarInt;
 use tempest_core::fio::FioFS;
 use tokio::sync::{mpsc, oneshot};
@@ -46,23 +35,28 @@ pub mod memtable;
 pub mod sst;
 pub mod wal;
 
+mod compaction;
+mod file_gc;
+mod flush;
+mod recovery;
+
 #[cfg(test)]
 mod tests;
 
 #[derive(Debug)]
-pub struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
-    /// The ID of this silo.
+pub struct Storage<F: FioFS, C: Comparer = DefaultComparer> {
+    /// The ID of this storage.
     id: u64,
-    /// The root directory for this silo.
+    /// The root directory for this storage.
     root_dir: PathBuf,
-    /// The file system that is backing this silo.
+    /// The file system that is backing this storage.
     fs: F,
 
-    /// The manifest that manages state of this silo.
+    /// The manifest that manages state of this storage.
     manifest: StorageManifest<F>,
 
-    /// The write-ahead log that ensure durability of writes to this silo.
-    wal: SiloWal<F>,
+    /// The write-ahead log that ensure durability of writes to this storage.
+    wal: Wal<F>,
 
     /// The currently active memtable.
     active: MemTable<C>,
@@ -74,22 +68,24 @@ pub struct Silo<F: FioFS, C: Comparer = DefaultComparer> {
     /// [`shutdown`]: Self::shutdown
     is_shutdown: bool,
 
-    config: SiloConfig,
+    config: StorageConfig,
 }
 
 fn read_varint(src: &[u8]) -> Option<(usize, usize)> {
     usize::decode_var(src)
 }
 
-impl<F: FioFS, C: Comparer> Silo<F, C> {
+impl<F: FioFS, C: Comparer> Storage<F, C> {
+    #[instrument(skip(fs, root_dir), level = "info")]
     pub(crate) async fn init(
         id: u64,
         fs: F,
         root_dir: impl Into<PathBuf>,
-        config: SiloConfig,
+        config: StorageConfig,
     ) -> StorageResult<Self> {
-        info!(?config, "initializing silo");
+        info!(?config, "initializing storage");
         let root_dir = root_dir.into();
+        fs.create_dir_all(&root_dir.join(SST_DIR)).await?;
 
         // initialize manifest
         let mut manifest =
@@ -97,30 +93,31 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
         // allocate filenums for other components
         let filenum_range = manifest.get_filenums(1).await?;
-        let mut filenums = filenum_range.into_iter();
+        let wal_filenum = filenum_range.start;
 
-        // initialize wal
-        let (wal, mut recovery_reader) = SiloWal::init(
+        // initialize write-ahead log
+        let (wal, recovery_reader) = Wal::init(
             fs.clone(),
             root_dir.clone(),
-            filenums.next().unwrap(),
+            wal_filenum,
             manifest.wal_filenums(),
             config.wal.clone(),
         )
         .await?;
 
-        let smallest_wal_filenum = manifest
-            .wal_filenums()
-            .iter()
-            .min()
-            .copied()
-            .unwrap_or_else(|| wal.current_filenum());
+        // NB: register wal into manifest *after* initializing, not before. the recovery reader
+        // must not know about itself yet, before the new wal file is created.
+        manifest
+            .handle_request(ManifestRequest::new().with_wal_filenums_added([wal_filenum]))
+            .await?;
+
+        let smallest_wal_filenum = manifest.min_wal_filenum().unwrap_or(wal.filenum());
 
         // initialize memtables
         let active = MemTable::new(smallest_wal_filenum);
         let immutables = Vec::new();
 
-        let mut silo = Self {
+        let mut storage = Self {
             id,
             root_dir,
             fs,
@@ -137,30 +134,14 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
             config,
         };
 
-        while let Some(res) = recovery_reader.next().await {
-            // skip over errors
-            let data = match res {
-                Ok(d) => d,
-                Err(e) => {
-                    warn!("could not recover record from wal: {}, skipping", e);
-                    continue;
-                }
-            };
+        storage.replay_wal(recovery_reader).await?;
 
-            let batch_seqnum = WriteBatch::seqnum(&data)?;
-            if batch_seqnum <= silo.manifest.max_flushed_seqnum() {
-                trace!(
-                    ?batch_seqnum,
-                    "skipping already flushed batch during recovery"
-                );
-                continue;
-            }
+        // do file gc on orphaned files that may be created during uncontrolled shutdowns
+        let orphans = storage.collect_sst_orphans().await?;
+        storage.spawn_file_gc(orphans);
 
-            silo.apply_batch_to_memtable(data.freeze())?;
-        }
-
-        info!("finished initializing silo");
-        Ok(silo)
+        info!("finished initializing storage");
+        Ok(storage)
     }
 
     async fn get_seqnum(&mut self) -> StorageResult<SeqNum> {
@@ -185,167 +166,23 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         // TODO: unwrap here? check validity first? maybe this is fine
         self.apply_batch_to_memtable(body)?;
 
-        // TODO: Implement wal rotation
-        //
-        //match wal_status {
-        //    WalStatus::Ok => {},
-        //    WalStatus::NeedsRotation => self.wal.rotate(),
-        //}
-
-        self.maybe_freeze();
-        self.maybe_flush().await?;
-
-        Ok(())
-    }
-
-    fn apply_batch_to_memtable(&mut self, mut body: Bytes) -> StorageResult<()> {
-        let header = body.split_to(12);
-
-        let seqnum_raw = u64::from_le_bytes(header[0..8].try_into().unwrap());
-        let seqnum = seqnum_raw.try_into()?;
-
-        let count = u32::from_le_bytes(header[8..12].try_into().unwrap());
-
-        // TODO: verify remaining length along the way, to prevent panics if batch is malformed
-        let mut pairs: Vec<(KeyKind, Bytes, Bytes)> = Vec::new();
-        for idx in 0..count {
-            trace!(idx, "reading entry");
-
-            // get kind
-            let kind_byte = body.split_to(1)[0];
-            let kind: KeyKind = kind_byte.try_into()?;
-
-            // get key length varint
-            let (key_len, varint_bytes_read) =
-                read_varint(&body[..]).ok_or(StorageError::InvalidVarint)?;
-            body.advance(varint_bytes_read);
-
-            // get key
-            let key = body.split_to(key_len);
-            trace!(?kind, key_len, ?key, idx, "got key");
-
-            match kind {
-                KeyKind::Delete => {
-                    pairs.push((kind, key, Bytes::new()));
-                }
-                KeyKind::Put => {
-                    // get value length varint
-                    let (value_len, varint_bytes_read) =
-                        read_varint(&body[..]).ok_or(StorageError::InvalidVarint)?;
-                    body.advance(varint_bytes_read);
-
-                    // get value
-                    let value = body.split_to(value_len);
-                    trace!(value_len, ?value, idx, "got value");
-
-                    pairs.push((kind, key, value));
-                }
+        // -- rotate wal if needed --
+        match wal_status {
+            WalStatus::Ok => {}
+            WalStatus::NeedsRotation => {
+                let filenum = self.manifest.get_filenums(1).await?.start;
+                self.manifest
+                    .handle_request(ManifestRequest::new().with_wal_filenums_added([filenum]))
+                    .await?;
+                self.wal.rotate(filenum).await?;
+                let wal_orphans = self.collect_wal_orphans().await?;
+                self.spawn_file_gc(wal_orphans);
             }
         }
 
-        for (kind, key, value) in pairs {
-            let trailer = KeyTrailer::new(seqnum, kind);
-            let key = InternalKey::new(key, trailer);
-            self.active.insert(key, value);
-        }
-
-        Ok(())
-    }
-
-    fn maybe_freeze(&mut self) {
-        if self.active.approximate_size() >= self.config.memtable.size_threshold {
-            self.freeze_current_memtable();
-        }
-    }
-
-    fn freeze_current_memtable(&mut self) {
-        let frozen = std::mem::replace(&mut self.active, MemTable::new(self.wal.current_filenum()));
-        self.immutables.insert(0, Arc::new(frozen));
-    }
-
-    async fn maybe_flush(&mut self) -> StorageResult<()> {
-        while !self.immutables.is_empty() {
-            self.flush_oldest_immutable().await?;
-        }
-        Ok(())
-    }
-
-    #[instrument(skip_all)]
-    async fn flush_oldest_immutable(&mut self) -> StorageResult<()> {
-        let imm = self.immutables.last().expect("checked by caller");
-
-        let entry_count = imm.len();
-        let min_key = imm.min_key().expect("non-empty immutable").key().clone();
-        let max_key = imm.max_key().expect("non-empty immutable").key().clone();
-        let min_seqnum = imm.min_seqnum().expect("non-empty immutable");
-        let max_seqnum = imm.max_seqnum().expect("non-empty immutable");
-        debug!(
-            entry_count,
-            ?min_key,
-            ?max_key,
-            ?min_seqnum,
-            ?max_seqnum,
-            "flushing oldest memtable to sst"
-        );
-
-        let filenum_range = self.manifest.get_filenums(1).await?;
-        let filenum = filenum_range.start;
-        let level = 0;
-
-        let sst_path = get_sst_path(&self.root_dir, level, filenum);
-        debug!(filenum, ?sst_path, "determined filenum");
-        self.fs.create_dir_all(sst_path.parent().unwrap()).await?;
-        let file = self
-            .fs
-            .opts()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&sst_path)
-            .await?;
-
-        let mut writer = SstWriter::<_, C>::new(file, entry_count, self.config.sst.clone());
-        writer.extend_from_collection(imm.iter()).await?;
-        let file_size = writer.finalize().await?;
-
-        let metadata = SstMetadata {
-            filenum,
-            file_size,
-            level,
-            min_key,
-            max_key,
-            min_seqnum,
-            max_seqnum,
-        };
-
-        self.immutables.pop();
-        trace!(?metadata, "finished flushing memtable to sst");
-
-        let min_remaining = self
-            .immutables
-            .iter()
-            .map(|imm| imm.wal_filenum())
-            .min()
-            .unwrap_or(self.active.wal_filenum())
-            // TODO: is active.wal_filenum() always greater than imm.wal_filenum()? -> omit this
-            .min(self.active.wal_filenum());
-
-        let filenums_to_remove: Vec<_> = self
-            .manifest
-            .wal_filenums()
-            .iter()
-            .copied()
-            .filter(|&f| f < min_remaining)
-            .collect();
-
-        trace!(?filenums_to_remove, "removing unused wals from manifest");
-        self.manifest
-            .handle_request(
-                ManifestRequest::new()
-                    .with_ssts_added([metadata])
-                    .with_wal_filenums_removed(filenums_to_remove),
-            )
-            .await?;
+        // -- freeze an flush memtables --
+        self.maybe_freeze();
+        self.maybe_flush().await?;
 
         Ok(())
     }
@@ -369,7 +206,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
         debug!("checking ssts");
         let search_key = InternalKey::new(key.as_ref(), KeyTrailer::new(snapshot, KeyKind::MAX));
         for sst_meta in self.manifest.ssts() {
-            let path = get_sst_path(&self.root_dir, sst_meta.level, sst_meta.filenum);
+            let path = get_sst_path(&self.root_dir, sst_meta.filenum);
             let file = self.fs.opts().read(true).open(&path).await?;
             let reader = SstReader::<_, C>::open(file).await?;
             if let Some(value) = reader.get(&search_key).await? {
@@ -402,7 +239,7 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
         // -- pull from ssts --
         for sst_meta in self.manifest.ssts() {
-            let path = get_sst_path(&self.root_dir, sst_meta.level, sst_meta.filenum);
+            let path = get_sst_path(&self.root_dir, sst_meta.filenum);
             let file = self.fs.opts().read(true).open(&path).await?;
             let reader = SstReader::<_, C>::open(file).await?;
             sources.push(MergingIteratorHeapEntry::new(
@@ -434,32 +271,25 @@ impl<F: FioFS, C: Comparer> Silo<F, C> {
 
         Ok(())
     }
-
-    /// Test only helper that forces the current active memtable to be frozen to the immutables.
-    #[cfg(test)]
-    fn test_force_freeze(&mut self) {
-        debug!("force freezing current memtable");
-        self.freeze_current_memtable();
-    }
 }
 
-impl<F: FioFS, C: Comparer> Drop for Silo<F, C> {
+impl<F: FioFS, C: Comparer> Drop for Storage<F, C> {
     fn drop(&mut self) {
         if !self.is_shutdown {
-            error!(id = self.id, "silo was not shut down correctly!");
+            error!(id = self.id, "storage was not shut down correctly!");
         }
     }
 }
 
-pub struct SiloHandle {
-    sender: mpsc::Sender<SiloCommand>,
+pub struct StorageHandle {
+    sender: mpsc::Sender<StorageCommand>,
 }
 
-impl SiloHandle {
+impl StorageHandle {
     pub async fn write(&self, batch: WriteBatch) -> StorageResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(SiloCommand::Write {
+            .send(StorageCommand::Write {
                 batch,
                 respond_to: tx,
             })
@@ -470,14 +300,14 @@ impl SiloHandle {
     pub(crate) async fn shutdown(&self) -> StorageResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(SiloCommand::Shutdown { respond_to: tx })
+            .send(StorageCommand::Shutdown { respond_to: tx })
             .await?;
         rx.await?
     }
 }
 
 #[derive(Debug)]
-pub enum SiloCommand {
+pub enum StorageCommand {
     Write {
         batch: WriteBatch,
         respond_to: oneshot::Sender<StorageResult<()>>,
@@ -496,48 +326,48 @@ pub enum CommandControlFlow {
     },
 }
 
-/// A background worker that can be controlled through channel commands and manages a [`Silo`].
-pub struct SiloWorker<F: FioFS, C: Comparer> {
-    silo: Silo<F, C>,
-    receiver: mpsc::Receiver<SiloCommand>,
+/// A background worker that can be controlled through channel commands and manages a [`Storage`].
+pub struct StorageWorker<F: FioFS, C: Comparer> {
+    storage: Storage<F, C>,
+    receiver: mpsc::Receiver<StorageCommand>,
 }
 
-impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
-    /// Creates a silo worker that initializes and manages a [`Silo`] within the `root_dir`.
+impl<F: FioFS, C: Comparer> StorageWorker<F, C> {
+    /// Creates a storage worker that initializes and manages a [`Storage`] within the `root_dir`.
     pub fn spawn_worker(
         id: u64,
         fs: F,
         root_dir: impl Into<PathBuf>,
-        config: SiloConfig,
-    ) -> SiloHandle {
+        config: StorageConfig,
+    ) -> StorageHandle {
         let root_dir = root_dir.into();
-        let silo_dir = root_dir.join(format!("silo-{}", id));
+        let storage_dir = root_dir.join(format!("storage-{}", id));
         let (sender, receiver) = mpsc::channel(1024);
 
         thread::spawn(move || {
-            let _worker_entered = span!(Level::INFO, "silo-worker", id).entered();
-            info!(id, ?root_dir, "spawning silo worker");
+            let _worker_entered = span!(Level::INFO, "storage-worker", id).entered();
+            info!(id, ?root_dir, "spawning storage worker");
             // Specify core affinity for this worker
             core_affinity::set_for_current(core_affinity::CoreId { id: id as usize });
 
             let result = tokio_uring::start(async move {
                 info!(id, "initialized tokio-uring runtime");
-                let silo = Silo::<F, C>::init(id, fs, silo_dir, config).await?;
-                let mut worker = SiloWorker { silo, receiver };
+                let storage = Storage::<F, C>::init(id, fs, storage_dir, config).await?;
+                let mut worker = StorageWorker { storage, receiver };
                 worker.start().await;
 
                 Ok::<_, StorageError>(())
             });
             if let Err(err) = result {
-                error!("silo worker crashed: {}", err);
+                error!("storage worker crashed: {}", err);
             }
         });
 
-        SiloHandle { sender }
+        StorageHandle { sender }
     }
 
     async fn start(&mut self) {
-        info!("starting silo worker");
+        info!("starting storage worker");
         let respond_to = loop {
             let control_flow = match self.receiver.recv().await {
                 Some(cmd) => match self.handle_command(cmd).await {
@@ -562,7 +392,7 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
             }
         };
 
-        let result = self.silo.shutdown().await;
+        let result = self.storage.shutdown().await;
         if let Some(tx) = respond_to {
             if let Err(_) = tx.send(result) {
                 error!("could not send shutdown confirmation: channel closed");
@@ -576,10 +406,10 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
     }
 
     #[instrument(skip_all)]
-    async fn handle_command(&mut self, cmd: SiloCommand) -> StorageResult<CommandControlFlow> {
+    async fn handle_command(&mut self, cmd: StorageCommand) -> StorageResult<CommandControlFlow> {
         match cmd {
-            SiloCommand::Write { batch, respond_to } => {
-                let result = self.silo.write(batch).await;
+            StorageCommand::Write { batch, respond_to } => {
+                let result = self.storage.write(batch).await;
                 if let Err(e) = result.as_ref() {
                     error!("failed to execute write command: {}", e);
                 }
@@ -588,8 +418,10 @@ impl<F: FioFS, C: Comparer> SiloWorker<F, C> {
                 }
                 Ok(CommandControlFlow::Continue)
             }
-            SiloCommand::Scan {} => todo!(),
-            SiloCommand::Shutdown { respond_to } => Ok(CommandControlFlow::Shutdown { respond_to }),
+            StorageCommand::Scan {} => todo!(),
+            StorageCommand::Shutdown { respond_to } => {
+                Ok(CommandControlFlow::Shutdown { respond_to })
+            }
         }
     }
 }

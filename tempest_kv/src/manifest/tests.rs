@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use tempest_core::fio::VirtualFileSystem;
 
-use crate::config::SiloConfig;
+use crate::config::StorageConfig;
 
 use super::*;
 
@@ -15,7 +15,7 @@ async fn make_manifest(config: ManifestConfig) -> StorageManifest<VirtualFileSys
 
 #[tokio::test]
 async fn test_seqnum_range_basic() {
-    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let mut m = make_manifest(StorageConfig::for_testing().manifest).await;
     let start = m.seqnum_current();
 
     let range = m.get_seqnums(5).await.unwrap();
@@ -23,11 +23,13 @@ async fn test_seqnum_range_basic() {
     assert_eq!(range.start, start);
     assert_eq!(range.end.get() - range.start.get(), 5);
     assert_eq!(m.seqnum_current(), range.end);
+
+    m.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_seqnum_ranges_are_contiguous() {
-    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let mut m = make_manifest(StorageConfig::for_testing().manifest).await;
 
     let r1 = m.get_seqnums(10).await.unwrap();
     let r2 = m.get_seqnums(10).await.unwrap();
@@ -35,11 +37,13 @@ async fn test_seqnum_ranges_are_contiguous() {
 
     assert_eq!(r1.end, r2.start, "r1 and r2 must be contiguous");
     assert_eq!(r2.end, r3.start, "r2 and r3 must be contiguous");
+
+    m.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_seqnum_exceeding_limit_expands_it() {
-    let config = SiloConfig::for_testing().manifest;
+    let config = StorageConfig::for_testing().manifest;
     let mut m = make_manifest(config).await;
 
     let initial_limit = m.journal.seqnum_limit;
@@ -51,13 +55,15 @@ async fn test_seqnum_exceeding_limit_expands_it() {
         m.journal.seqnum_limit > initial_limit,
         "limit must have expanded"
     );
+
+    m.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_seqnum_large_request_gets_exact_range() {
     let config = ManifestConfig {
         seqnum_limit_step: 10,
-        ..SiloConfig::for_testing().manifest
+        ..StorageConfig::for_testing().manifest
     };
     let mut m = make_manifest(config).await;
 
@@ -70,13 +76,15 @@ async fn test_seqnum_large_request_gets_exact_range() {
         needed,
         "must get exactly the requested number of seqnums"
     );
+
+    m.shutdown().await.unwrap();
 }
 
 // -- filenum range tests --
 
 #[tokio::test]
 async fn test_filenum_range_basic() {
-    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let mut m = make_manifest(StorageConfig::for_testing().manifest).await;
     let start = m.filenum_current();
 
     let range = m.get_filenums(3).await.unwrap();
@@ -84,23 +92,27 @@ async fn test_filenum_range_basic() {
     assert_eq!(range.start, start);
     assert_eq!(range.end - range.start, 3);
     assert_eq!(m.filenum_current(), range.end);
+
+    m.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_filenum_ranges_are_contiguous() {
-    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let mut m = make_manifest(StorageConfig::for_testing().manifest).await;
 
     let r1 = m.get_filenums(5).await.unwrap();
     let r2 = m.get_filenums(5).await.unwrap();
 
     assert_eq!(r1.end, r2.start, "filenum ranges must be contiguous");
+
+    m.shutdown().await.unwrap();
 }
 
 // -- overflow tests --
 
 #[tokio::test]
 async fn test_seqnum_overflow_is_detected() {
-    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let mut m = make_manifest(StorageConfig::for_testing().manifest).await;
 
     // Directly push seqnum_current near the maximum
     // We do this by requesting nearly the entire range in one shot.
@@ -113,11 +125,13 @@ async fn test_seqnum_overflow_is_detected() {
         "expected SeqNumOverflow, got {:?}",
         result
     );
+
+    m.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_filenum_overflow_is_detected() {
-    let mut m = make_manifest(SiloConfig::for_testing().manifest).await;
+    let mut m = make_manifest(StorageConfig::for_testing().manifest).await;
 
     // go to the u64 overflow boundary
     m.get_filenums(u64::MAX).await.unwrap();
@@ -129,6 +143,8 @@ async fn test_filenum_overflow_is_detected() {
         "expected FileNumOverflow, got {:?}",
         result
     );
+
+    m.shutdown().await.unwrap();
 }
 
 #[test]
@@ -145,12 +161,15 @@ fn test_sst_and_wal_in_same_edit() {
     // atomic flush edit: new SST in, WAL file out
     let sst = SstMetadata {
         filenum: 100,
-        file_size: 1024,
         level: 0,
-        min_key: Bytes::from("a"),
-        max_key: Bytes::from("z"),
-        min_seqnum: SeqNum::START,
-        max_seqnum: SeqNum::START,
+        stats: SstWriterStats {
+            file_size: 1024,
+            min_key: Bytes::from("a"),
+            max_key: Bytes::from("z"),
+            min_seqnum: SeqNum::START,
+            max_seqnum: SeqNum::START,
+            entry_count: 32,
+        },
     };
     state.apply(ManifestEdit::V1(ManifestEditV1 {
         ssts_added: Some(vec![sst]),

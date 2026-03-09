@@ -7,7 +7,7 @@ use std::{
 use bincode::Options;
 use bytes::{BufMut, BytesMut};
 use crc64::crc64;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio_uring::buf::BoundedBuf;
 
@@ -167,6 +167,7 @@ impl EditPrefix {
 }
 
 #[derive(Debug, Clone)]
+#[debug("JournalConfig({:?} => {}x)", ByteSize(*growth_baseline), growth_factor)]
 pub struct JournalConfig {
     pub growth_factor: f64,
     pub growth_baseline: u64,
@@ -250,15 +251,14 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
         Ok(scratch.len() as u64)
     }
 
-    #[instrument(skip(fs))]
+    #[instrument(skip(fs), level = "debug")]
     pub async fn open(fs: F, dir: PathBuf, config: JournalConfig) -> Result<Self, JournalError> {
         fs.create_dir_all(&dir).await?;
         let mut entries = fs.read_dir(&dir).await?;
         let mut scratch = BytesMut::with_capacity(4096);
 
         let mut journal_details = Vec::new();
-        while let Some(entry) = entries.next().await {
-            let entry = entry?;
+        while let Some(entry) = entries.try_next().await? {
             let file = fs.opts().read(true).write(true).open(entry.path()).await?;
 
             scratch.resize(JOURNAL_HEADER_SIZE, 0);
@@ -374,7 +374,7 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
         })
     }
 
-    #[instrument(skip(file, scratch))]
+    #[instrument(skip(file, scratch), level = "trace")]
     async fn read_edit(
         file: &F::File,
         filepos: u64,
@@ -421,7 +421,7 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
         (Ok((edit, bytes_read)), scratch)
     }
 
-    #[instrument(skip_all, fields(filesize=?ByteSize(self.filepos)))]
+    #[instrument(skip_all, fields(filesize=?ByteSize(self.filepos)), level = "trace")]
     pub async fn append(&mut self, edit: T::Edit) -> Result<(), JournalError> {
         let mut scratch = self.scratch.take().expect("scratch buffer exists");
         scratch.clear();

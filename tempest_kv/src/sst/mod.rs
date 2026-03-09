@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U32, U64};
 
 use crate::sst::bloom::BloomFilterFooter;
@@ -11,6 +13,15 @@ pub(crate) mod writer;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) const SST_DIR: &str = "ssts";
+
+pub(crate) fn get_sst_path(silo_root: impl AsRef<Path>, filenum: u64) -> PathBuf {
+    silo_root
+        .as_ref()
+        .join(SST_DIR)
+        .join(format!("{}.sst", filenum))
+}
 
 #[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
 #[repr(C)]

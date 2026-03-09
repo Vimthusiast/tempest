@@ -2,7 +2,7 @@ use num_enum::TryFromPrimitiveError;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    SiloCommand,
+    StorageCommand,
     base::{KeyKind, SeqNum},
 };
 
@@ -27,8 +27,8 @@ pub enum StorageError {
     #[display("invalid Varint: failed to decode.")]
     InvalidVarint,
 
-    #[display("could not send silo command: channel closed")]
-    SiloCommandSendError(mpsc::error::SendError<SiloCommand>),
+    #[display("could not send storage command: channel closed")]
+    StorageCommandSendError(mpsc::error::SendError<StorageCommand>),
 
     #[display("could not receive from oneshot channel: channel closed")]
     OneshotChannelRecvError(oneshot::error::RecvError),
@@ -36,6 +36,12 @@ pub enum StorageError {
     // TODO: specifically 'ManifestError'? -> only journal in this layer
     #[display("journal error: {}", _0)]
     JournalError(tempest_core::journal::JournalError),
+
+    #[display("wal header corrupted: expected filenum {} but got {}", expected, got)]
+    WalCorruption {
+        expected: u64,
+        got: u64
+    },
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;

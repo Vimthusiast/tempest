@@ -4,24 +4,21 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use futures::{StreamExt, TryStreamExt};
 use tempest_core::{
     fio::{FioFS, FioFile},
     utils::{ByteSize, HexU64},
 };
 use tokio_uring::buf::BoundedBuf;
-use tracing::{Instrument, Level};
 
 use crate::{
     base::{StorageError, StorageResult},
     config::WalConfig,
     wal::format::{
-        SILO_WAL_DIR_NAME, SILO_WAL_HEADER_SIZE, SILO_WAL_RECORD_PREFIX_SIZE, WalHeader,
-        WalRecordPrefix,
+        SILO_WAL_HEADER_SIZE, SILO_WAL_RECORD_PREFIX_SIZE, WAL_DIR, WalHeader, WalRecordPrefix,
     },
 };
 
-mod format;
+pub(crate) mod format;
 
 #[cfg(test)]
 mod tests;
@@ -156,82 +153,54 @@ pub struct WalRecoveryReader<F: FioFS> {
 }
 
 impl<F: FioFS> WalRecoveryReader<F> {
-    // TODO: Take in list of filenums to recover from manifest
+    /// Reads in all the `files` in form of a stream, in the order the filenums were supplied.
     #[instrument(skip_all)]
     async fn recover(fs: F, dir: impl AsRef<Path>, files: &[u64]) -> StorageResult<Self> {
         let dir = dir.as_ref();
-        info!(?dir, "creating wal recovery reader");
-        // TODO: use injected files list instead of searching
-        let entries: Vec<_> = fs
-            .read_dir(dir)
-            .await?
-            .try_filter(|e| futures::future::ready(!e.is_dir()))
-            .try_collect()
-            .await?;
+        info!(
+            ?dir,
+            num_files = files.len(),
+            "creating wal recovery reader"
+        );
 
-        if entries.len() > 0 {
-            info!("found {} wal files for recovery", entries.len());
-            let mut wal_details: Vec<_> = futures::stream::iter(entries)
-                .map(|e| {
-                    let fs = fs.clone();
-                    let span = span!(Level::DEBUG, "get-file-details", path=?e.path());
-                    async move {
-                        let file = match fs.opts().read(true).open(e.path()).await {
-                            Ok(f) => f,
-                            Err(e) => {
-                                error!("could not open wal file: {}", e);
-                                return Err(e.into());
-                            }
-                        };
-                        debug!("opened file");
-
-                        let buf = BytesMut::zeroed(SILO_WAL_HEADER_SIZE);
-                        let sliced_buf = buf.slice(..);
-                        let (res, sliced_buf) = file.read_exact_at(sliced_buf, 0).await;
-                        if let Err(e) = res {
-                            error!("could not reader header: {}", e);
-                            return Err(e.into());
-                        }
-                        debug!("read header bytes");
-
-                        let header = match WalHeader::decode(
-                            sliced_buf.into_inner().as_ref().try_into().unwrap(),
-                        ) {
-                            Ok(h) => h,
-                            Err(e) => {
-                                error!("could not decode header: {}", e);
-                                return Err(e.into());
-                            }
-                        };
-                        debug!(filenum = header.filenum, "decoded header");
-
-                        Ok::<_, StorageError>((header, file))
-                    }
-                    .instrument(span)
-                })
-                // run 10 reads at once
-                .buffer_unordered(10)
-                .try_collect()
-                .await?;
-
-            wal_details.sort_by_key(|(h, _f)| h.filenum);
-
-            let mut sources = Vec::new();
-            for (header, file) in wal_details {
-                let filepos = SILO_WAL_HEADER_SIZE as u64;
-                let size = file.size().await?;
-                debug!(
-                    filenum = header.filenum, size = ?ByteSize(size),
-                    "sourcing wal file through reader"
-                );
-                let reader = WalFileReader::new(file, filepos, size);
-                sources.push(reader)
-            }
-            Ok(Self { sources, pos: 0 })
-        } else {
-            let sources = Vec::new();
-            Ok(Self { sources, pos: 0 })
+        if files.is_empty() {
+            return Ok(Self {
+                sources: Vec::new(),
+                pos: 0,
+            });
         }
+
+        // files is already ordered by the manifest, no sort needed
+        let mut sources = Vec::with_capacity(files.len());
+        for &filenum in files {
+            let path = dir.join(format!("{}.log", filenum));
+            let file = fs.opts().read(true).open(&path).await?;
+
+            // verify header integrity before trusting this file
+            let buf = BytesMut::zeroed(SILO_WAL_HEADER_SIZE);
+            let (res, buf) = file.read_exact_at(buf.slice(..), 0).await;
+            res?;
+
+            let header = WalHeader::decode(buf.into_inner().as_ref().try_into().unwrap())?;
+
+            if header.filenum != filenum {
+                error!(
+                    expected = filenum,
+                    got = header.filenum,
+                    "WAL header filenum mismatch"
+                );
+                return Err(StorageError::WalCorruption {
+                    expected: filenum,
+                    got: header.filenum,
+                });
+            }
+
+            let filepos = SILO_WAL_HEADER_SIZE as u64;
+            let size = file.size().await?;
+            sources.push(WalFileReader::new(file, filepos, size));
+        }
+
+        Ok(Self { sources, pos: 0 })
     }
 
     pub async fn next(&mut self) -> Option<StorageResult<BytesMut>> {
@@ -250,7 +219,7 @@ impl<F: FioFS> WalRecoveryReader<F> {
     }
 }
 
-/// # Silo Write-Ahead Log
+/// # Storage Write-Ahead Log
 ///
 /// Ensures that writes are durable before being committed to the memtable of the LSM-Tree.
 ///
@@ -277,9 +246,9 @@ impl<F: FioFS> WalRecoveryReader<F> {
 /// +---------------+----------+-- .. --+
 /// ```
 #[derive(Debug)]
-pub struct SiloWal<F: FioFS> {
-    silo_dir: PathBuf,
-    wal_dir: PathBuf,
+pub struct Wal<F: FioFS> {
+    storage_dir: PathBuf,
+    root_dir: PathBuf,
 
     scratch: Option<BytesMut>,
 
@@ -292,21 +261,25 @@ pub struct SiloWal<F: FioFS> {
     config: WalConfig,
 }
 
-impl<F: FioFS> SiloWal<F> {
+pub(crate) fn wal_file_path(dir: &Path, filenum: u64) -> PathBuf {
+    dir.join(format!("{}.log", filenum))
+}
+
+impl<F: FioFS> Wal<F> {
     pub(crate) async fn init(
         fs: F,
-        silo_dir: PathBuf,
+        storage_dir: PathBuf,
         filenum: u64,
         files: &[u64],
         config: WalConfig,
     ) -> StorageResult<(Self, WalRecoveryReader<F>)> {
-        let wal_dir = silo_dir.join(SILO_WAL_DIR_NAME);
-        info!("initializing silo write-ahead log at {:?}", wal_dir);
-        fs.create_dir_all(&wal_dir).await?;
+        let root_dir = storage_dir.join(WAL_DIR);
+        info!("initializing write-ahead log at {:?}", root_dir);
+        fs.create_dir_all(&root_dir).await?;
 
-        let recovery_reader = WalRecoveryReader::recover(fs.clone(), &wal_dir, files).await?;
+        let recovery_reader = WalRecoveryReader::recover(fs.clone(), &root_dir, files).await?;
 
-        let current_file_path = wal_dir.join(format!("{}.log", filenum));
+        let current_file_path = wal_file_path(&root_dir, filenum);
         let current_file = fs
             .opts()
             .read(true)
@@ -328,8 +301,8 @@ impl<F: FioFS> SiloWal<F> {
         let scratch = sliced_scratch.into_inner();
 
         let wal = Self {
-            silo_dir,
-            wal_dir,
+            storage_dir,
+            root_dir,
 
             scratch: Some(scratch),
 
@@ -358,14 +331,14 @@ impl<F: FioFS> SiloWal<F> {
 
     /// Writes out the data into the current write-ahead log file.
     /// Note that, while we do write to the file, we don't `fsync` in any way, so the caller is
-    /// responsible. Returns the current status of this WAL.
-    #[instrument(skip_all, level = "debug")]
+    /// responsible, allowing for multiple appends in a row, before flushing (batching).
+    ///
+    /// # Returns
+    ///
+    /// Returns the current status of this WAL, wrapped in a flush-guard.
+    #[instrument(skip_all, level = "debug", fields(data_size = ?ByteSize(data.len() as u64), filesize=?HexU64(self.filepos)))]
     pub(crate) async fn append(&mut self, data: Bytes) -> StorageResult<WalFlushRequired> {
         let mut filepos = self.filepos;
-        debug!(
-            data_size=?ByteSize(data.len() as u64), filepos=?HexU64(filepos),
-            "appending to write-ahead log"
-        );
 
         // encode record prefix into scratch buffer and write it out to the file
         debug!("writing record prefix");
@@ -387,11 +360,9 @@ impl<F: FioFS> SiloWal<F> {
 
         // NB: slice up data explicitly for io_uring passing. uring interface does not respect
         // length of the buffer, but capacity otherwise.
-        // TODO: Maybe we don't have to do this if `Bytes` is truncated, just for `BytesMut`.
         debug!("writing record body");
         let data_len = data.len();
-        let data_slice = BoundedBuf::slice(data, ..data_len);
-        let (res, _data_slice) = self.current_file.write_all_at(data_slice, filepos).await;
+        let (res, _data) = self.current_file.write_all_at(data, filepos).await;
         if let Err(e) = res {
             return Err(e.into());
         }
@@ -413,13 +384,44 @@ impl<F: FioFS> SiloWal<F> {
         Ok(WalFlushRequired(self.get_status()))
     }
 
+    pub(crate) async fn rotate(&mut self, filenum: u64) -> StorageResult<()> {
+        let current_file_path = wal_file_path(&self.root_dir, filenum);
+        let current_file = self
+            .fs
+            .opts()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&current_file_path)
+            .await?;
+
+        let mut scratch = self.scratch.take().expect("scratch buffer exists");
+        scratch.clear();
+
+        let header = WalHeader::new(filenum);
+        scratch.put_slice(&header.encode());
+        let sliced_scratch = scratch.slice(..);
+        let (res, sliced_scratch) = current_file.write_all_at(sliced_scratch, 0).await;
+        self.scratch = Some(sliced_scratch.into_inner());
+        if let Err(e) = res {
+            return Err(e.into());
+        }
+
+        self.current_file = current_file;
+        self.filenum = filenum;
+        self.filepos = SILO_WAL_HEADER_SIZE as u64;
+        self.record_count = 0;
+
+        Ok(())
+    }
+
     /// Executes a flush of the WAL and returns the inner status from that flush.
     pub(crate) async fn flush(&mut self, flush: WalFlushRequired) -> StorageResult<WalStatus> {
         self.current_file.sync_all().await?;
         Ok(flush.0)
     }
 
-    pub(crate) fn current_filenum(&self) -> u64 {
+    pub(crate) fn filenum(&self) -> u64 {
         self.filenum
     }
 }

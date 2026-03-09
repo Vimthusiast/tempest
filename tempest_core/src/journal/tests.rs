@@ -47,7 +47,7 @@ async fn test_journal() -> Result<(), JournalError> {
     setup_tracing();
 
     let fs = VirtualFileSystem::new();
-    let dir = PathBuf::from("journal-dir");
+    let dir = PathBuf::from("/journal-dir");
     let config = JournalConfig::default();
     {
         // open first journal

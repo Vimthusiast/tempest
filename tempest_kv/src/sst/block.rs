@@ -328,7 +328,7 @@ mod tests {
     use super::*;
     use crate::{
         base::{DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum},
-        config::SiloConfig,
+        config::StorageConfig,
     };
     use bytes::Bytes;
     use tempest_core::test_utils::setup_tracing;
@@ -343,7 +343,7 @@ mod tests {
 
     #[instrument]
     fn build_block(entries: &[(&str, u64, &str)]) -> Bytes {
-        let config = SiloConfig::for_testing().sst;
+        let config = StorageConfig::for_testing().sst;
         let mut builder =
             BlockBuilder::new(config.block_target_size, config.block_restart_interval);
         for (key, seqnum, value) in entries {
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_iterator_trailers_preserved() {
-        let config = SiloConfig::for_testing().sst;
+        let config = StorageConfig::for_testing().sst;
         let mut builder =
             BlockBuilder::new(config.block_target_size, config.block_restart_interval);
         let k = Bytes::from("key");
@@ -625,7 +625,7 @@ mod tests {
         setup_tracing();
 
         // force versions of the same key to span a restart boundary
-        let config = SiloConfig::for_testing().sst;
+        let config = StorageConfig::for_testing().sst;
         let restart_interval = config.block_restart_interval;
         let mut builder = BlockBuilder::new(config.block_target_size, restart_interval);
 
