@@ -14,6 +14,8 @@ impl<F: FioFS, C: Comparer> Storage<F, C> {
         if self.manifest.ssts().len() >= self.config.compaction.l0_file_threshold {
             debug!("compaction triggered");
             self.compact_l0().await?;
+        } else {
+            debug!("compaction not triggered");
         }
         Ok(())
     }
@@ -103,8 +105,8 @@ mod tests {
     fn compaction_test_config() -> StorageConfig {
         StorageConfig {
             memtable: MemTableConfig {
-                size_threshold: 64,
-                max_immutable_count: 2,
+                size_threshold: 32,
+                max_immutable_count: 1,
             },
             compaction: CompactionConfig {
                 l0_file_threshold: 2,
