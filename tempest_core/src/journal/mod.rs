@@ -168,8 +168,8 @@ impl EditPrefix {
 
 #[derive(Debug, Clone)]
 pub struct JournalConfig {
-    growth_factor: f64,
-    growth_baseline: u64,
+    pub growth_factor: f64,
+    pub growth_baseline: u64,
 }
 
 impl Default for JournalConfig {
@@ -187,7 +187,7 @@ pub trait Replayable {
     type Edit: Serialize + DeserializeOwned;
 
     /// Apply another [`Self::Edit`] to the current state.
-    fn apply(&mut self, edit: &Self::Edit);
+    fn apply(&mut self, edit: Self::Edit);
 
     /// Calculate a new edit that can be used to reconstruct the current state.
     /// This is required to create the initial edit for file rotations.
@@ -201,6 +201,7 @@ pub trait Replayable {
     fn initial() -> Self;
 }
 
+#[derive(Debug)]
 pub struct Journal<T: Replayable, F: FioFS> {
     // file access
     dir: PathBuf,
@@ -300,7 +301,7 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
                 (res, scratch) = Self::read_edit(&current_file, filepos, scratch).await;
                 match res {
                     Ok((edit, bytes_read)) => {
-                        state.apply(&edit);
+                        state.apply(edit);
                         filepos += bytes_read;
                     }
                     // i/o errors are fatal
@@ -421,12 +422,12 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
     }
 
     #[instrument(skip_all, fields(filesize=?ByteSize(self.filepos)))]
-    pub async fn append(&mut self, edit: &T::Edit) -> Result<(), JournalError> {
+    pub async fn append(&mut self, edit: T::Edit) -> Result<(), JournalError> {
         let mut scratch = self.scratch.take().expect("scratch buffer exists");
         scratch.clear();
 
         // write the edit into the scratch buffer
-        let edit_length = match Self::write_edit(&mut scratch, edit) {
+        let edit_length = match Self::write_edit(&mut scratch, &edit) {
             Ok(len) => len,
             Err(err) => {
                 self.scratch = Some(scratch);

@@ -1,3 +1,5 @@
+use tempest_core::journal::JournalConfig;
+
 #[derive(Debug, Clone)]
 pub struct MemTableConfig {
     /// Approximate byte size before the active memtable is frozen.
@@ -35,9 +37,18 @@ pub struct ManifestConfig {
     pub seqnum_limit_step: u64,
     pub filenum_limit_step: u64,
     /// File grows beyond `initial_size * growth_factor` before rotation.
-    pub growth_factor: u64,
+    pub growth_factor: f64,
     /// Minimum file size before the growth factor kicks in.
     pub growth_baseline: u64,
+}
+
+impl ManifestConfig {
+    pub fn journal_config(&self) -> JournalConfig {
+        JournalConfig {
+            growth_factor: self.growth_factor,
+            growth_baseline: self.growth_baseline,
+        }
+    }
 }
 
 impl Default for ManifestConfig {
@@ -45,7 +56,7 @@ impl Default for ManifestConfig {
         Self {
             seqnum_limit_step: 1_000,
             filenum_limit_step: 100,
-            growth_factor: 2,
+            growth_factor: 1.5,
             growth_baseline: 8 * 1024 * 1024, // 8 MiB
         }
     }

@@ -32,6 +32,10 @@ pub enum StorageError {
 
     #[display("could not receive from oneshot channel: channel closed")]
     OneshotChannelRecvError(oneshot::error::RecvError),
+
+    // TODO: specifically 'ManifestError'? -> only journal in this layer
+    #[display("journal error: {}", _0)]
+    JournalError(tempest_core::journal::JournalError),
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
