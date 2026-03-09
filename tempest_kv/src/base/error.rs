@@ -2,8 +2,8 @@ use num_enum::TryFromPrimitiveError;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    StorageCommand,
     base::{KeyKind, SeqNum},
+    worker::StorageCommand,
 };
 
 #[derive(Debug, Display, Error, From)]
@@ -38,10 +38,7 @@ pub enum StorageError {
     JournalError(tempest_core::journal::JournalError),
 
     #[display("wal header corrupted: expected filenum {} but got {}", expected, got)]
-    WalCorruption {
-        expected: u64,
-        got: u64
-    },
+    WalCorruption { expected: u64, got: u64 },
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;
