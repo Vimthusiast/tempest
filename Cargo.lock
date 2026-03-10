@@ -599,7 +599,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempest_sql"
+name = "tempest_schema"
 version = "0.1.0"
 dependencies = [
  "bytes",
