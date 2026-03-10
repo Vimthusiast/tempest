@@ -2,6 +2,7 @@
 members = [
     "tempest_core",
     "tempest_kv",
+    "tempest_schema",
 ]
 
 [package]

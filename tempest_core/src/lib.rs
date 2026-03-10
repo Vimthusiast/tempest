@@ -6,6 +6,7 @@ extern crate tracing;
 #[macro_use]
 extern crate derive_more;
 
+pub mod encoding;
 pub mod fio;
 pub mod journal;
 pub mod utils;
