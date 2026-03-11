@@ -21,13 +21,8 @@ SQL's type system puts the burden in the wrong place.
 to write `NOT NULL`. The result is that your schema lies - a column typed `INT` might actually
 be empty, and your application has to defensively handle that everywhere.
 
-**Adding a column is a footgun.** In SQL, `ALTER TABLE users ADD COLUMN bio TEXT NOT NULL` fails
-on existing rows because it can't produce a value retroactively. The workaround - a `DEFAULT ''` -
-fills your database with empty strings that mean "unknown." That's not a default, it's a lie
-dressed up as one.
-
 **Migrations are managed outside the database.** SQL has no built-in concept of schema history.
-Tools like Flyway, Alembic, and Rails migrations exist entirely because SQL can't track its own
+Tools like Flyway, Alembic, SQLx, and Rails migrations exist entirely because SQL can't track its own
 evolution. Your schema and your migration scripts are two separate sources of truth that can
 quietly drift apart.
 
@@ -40,14 +35,15 @@ wrong.
 
 ## TQL: Typed Query Language
 
-TQL is Tempest's query language. The core idea is that types are first-class citizens - defined
+TQL is Tempest's query language. The core idea is that types are first-class citizens: defined
 independently, reusable across the schema, and capable of carrying their own validation and
 ordering logic.
 
 ### Types and Tables are separate things
 
 A `type` defines the shape of data. A `table` attaches storage to a type. This means types can
-be embedded, reused, and referenced independently of any particular table.
+be embedded, reused, and referenced independently of any particular table, making it easy to,
+e.g. create functions that return table entries directly.
 
 ```tql
 // Types are PascalCase, defined independently of storage
@@ -71,14 +67,14 @@ create table users : User {
 }
 ```
 
-The rule is simple: **user-defined types are PascalCase, builtins are lowercase, and `:` always
-means "has type."** At a glance, you know what's yours and what's built in.
+The rules are, **user-defined types are PascalCase, builtins and keywords are lowercase,
+and `:` means "has type."**
 
-### Optional is honest about absence
+### Optional is honest about absence and enforces checks explicitly
 
 `Int8?` is shorthand for `Optional(Int8)` - a value that is explicitly either `Some(x)` or
-`None`. There is no implicit null. If a field can be absent, the type says so, and the query
-language requires you to handle it.
+`None`. There is no *implicit null*; actually there is no `NULL` at all. If a field can be absent,
+the type says so, and the query language requires you to handle it.
 
 ```tql
 // Pattern-match style: filter and bind in one step
@@ -119,6 +115,7 @@ alter table users rename column username to handle;
 Because Tempest's manifest already records schema history, the database itself is the source of
 truth for how the schema has evolved - no external migration tool required.
 
+<!--
 ### Custom types with behaviour
 
 Types can carry validation logic and custom ordering strategies, which map directly onto the
@@ -152,6 +149,7 @@ create table users : User {
 // Uses the custom `compare` defined on EmailAddress
 select id, email from users order by email;
 ```
+-->
 
 ---
 
@@ -159,7 +157,7 @@ select id, email from users order by email;
 
 - **Storage Engine** - Shared-nothing architecture using `io_uring` for async I/O without
   synchronization primitives. Inspired by [ScyllaDB] and [TigerBeetle].
-- **LSM-Tree Storage** - Manifest, MemTable, and WAL complete. SST implementation in progress.
+- **LSM-Tree Storage** - Manifest, MemTable, WAL, ans SST implementation complete.
 - **Hybrid Logical Clocks (HLC)** - Causality tracking across distributed storages, encoded
   directly into key suffixes for efficient ordering at the storage layer. Not yet implemented.
 - **Iterator Layer** - k-way merge iterators for the read path, collecting across MemTable
