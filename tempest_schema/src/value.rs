@@ -5,7 +5,7 @@ use tempest_core::encoding::{
     BufGetLexicalExt, BufGetRawExt, BufPutLexicalExt, BufPutRawExt, DecodeError, LexicalDecodeError,
 };
 
-#[derive(Debug, strum::EnumDiscriminants)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, strum::EnumDiscriminants)]
 #[strum_discriminants(name(TempestType))]
 #[repr(u8)]
 pub enum TempestValue<'a> {
@@ -99,7 +99,7 @@ mod tests {
     fn test_int64_roundtrip() {
         for val in [0i64, 1, -1, i64::MIN, i64::MAX, 42, -1000] {
             let result = roundtrip(TempestValue::Int64(val));
-            assert!(matches!(result, TempestValue::Int64(v) if v == val));
+            assert_eq!(result, TempestValue::Int64(val));
         }
     }
 
@@ -107,7 +107,7 @@ mod tests {
     fn test_bool_roundtrip() {
         for val in [true, false] {
             let result = roundtrip(TempestValue::Bool(val));
-            assert!(matches!(result, TempestValue::Bool(v) if v == val));
+            assert_eq!(result, TempestValue::Bool(val));
         }
     }
 
@@ -115,7 +115,7 @@ mod tests {
     fn test_string_roundtrip() {
         for val in ["", "hello", "tempest", "unicode: ??", "hel\x00lo"] {
             let result = roundtrip(TempestValue::String(Cow::Borrowed(val)));
-            assert!(matches!(result, TempestValue::String(ref s) if s.as_ref() == val));
+            assert_eq!(result, TempestValue::String(Cow::Borrowed(val)));
         }
     }
 
@@ -138,7 +138,7 @@ mod tests {
     fn test_int64_lexical_roundtrip() {
         for val in [0i64, 1, -1, i64::MIN, i64::MAX, 42, -1000] {
             let result = roundtrip_lexical(TempestValue::Int64(val));
-            assert!(matches!(result, TempestValue::Int64(v) if v == val));
+            assert_eq!(result, TempestValue::Int64(val));
         }
     }
 
@@ -146,7 +146,7 @@ mod tests {
     fn test_bool_lexical_roundtrip() {
         for val in [true, false] {
             let result = roundtrip_lexical(TempestValue::Bool(val));
-            assert!(matches!(result, TempestValue::Bool(v) if v == val));
+            assert_eq!(result, TempestValue::Bool(val));
         }
     }
 
@@ -154,7 +154,7 @@ mod tests {
     fn test_string_lexical_roundtrip() {
         for val in ["", "hello", "tempest", "hel\x00lo", "\x00\x00\x00"] {
             let result = roundtrip_lexical(TempestValue::String(Cow::Borrowed(val)));
-            assert!(matches!(result, TempestValue::String(ref s) if s.as_ref() == val));
+            assert_eq!(result, TempestValue::String(Cow::Borrowed(val)));
         }
     }
 
@@ -202,10 +202,16 @@ mod tests {
 
     #[test]
     fn test_ty_returns_correct_discriminant() {
-        assert_eq!(TempestValue::Int64(0).ty(), TempestType::Int64);
-        assert_eq!(TempestValue::Bool(false).ty(), TempestType::Bool);
         assert_eq!(
-            TempestValue::String(Cow::Borrowed("")).ty(),
+            TempestValue::Int64(Default::default()).ty(),
+            TempestType::Int64
+        );
+        assert_eq!(
+            TempestValue::Bool(Default::default()).ty(),
+            TempestType::Bool
+        );
+        assert_eq!(
+            TempestValue::String(Default::default()).ty(),
             TempestType::String
         );
     }
@@ -235,16 +241,17 @@ mod tests {
         TempestValue::String(Cow::Borrowed("hi")).encode(&mut buf);
 
         let mut bytes = buf.freeze();
-        assert!(matches!(
+        assert_eq!(
             TempestValue::decode(&mut bytes, TempestType::Int64).unwrap(),
             TempestValue::Int64(42)
-        ));
-        assert!(matches!(
+        );
+        assert_eq!(
             TempestValue::decode(&mut bytes, TempestType::Bool).unwrap(),
             TempestValue::Bool(true)
-        ));
-        assert!(
-            matches!(TempestValue::decode(&mut bytes, TempestType::String).unwrap(), TempestValue::String(ref s) if s.as_ref() == "hi")
+        );
+        assert_eq!(
+            TempestValue::decode(&mut bytes, TempestType::String).unwrap(),
+            TempestValue::String(Cow::Borrowed("hi"))
         );
         assert!(bytes.is_empty());
     }
@@ -257,17 +264,18 @@ mod tests {
         TempestValue::Bool(false).encode_lexical(&mut buf);
 
         let mut bytes = buf.freeze();
-        assert!(matches!(
+        assert_eq!(
             TempestValue::decode_lexical(&mut bytes, TempestType::Int64).unwrap(),
             TempestValue::Int64(-99)
-        ));
-        assert!(
-            matches!(TempestValue::decode_lexical(&mut bytes, TempestType::String).unwrap(), TempestValue::String(ref s) if s.as_ref() == "foo")
         );
-        assert!(matches!(
+        assert_eq!(
+            TempestValue::decode_lexical(&mut bytes, TempestType::String).unwrap(),
+            TempestValue::String(Cow::Borrowed("foo"))
+        );
+        assert_eq!(
             TempestValue::decode_lexical(&mut bytes, TempestType::Bool).unwrap(),
             TempestValue::Bool(false)
-        ));
+        );
         assert!(bytes.is_empty());
     }
 }

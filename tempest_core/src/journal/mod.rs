@@ -7,7 +7,7 @@ use std::{
 use bincode::Options;
 use bytes::{BufMut, BytesMut};
 use crc64::crc64;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio_uring::buf::BoundedBuf;
 
