@@ -654,6 +654,8 @@ dependencies = [
  "derive_more",
  "itertools",
  "logos",
+ "strum",
+ "tracing",
 ]
 
 [[package]]

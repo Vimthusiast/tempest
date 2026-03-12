@@ -1,10 +1,9 @@
 use std::ops::Range;
 
 use derive_more::{Display, Error};
-use itertools::Itertools;
 use logos::Logos;
 
-use crate::lexer::token::Token;
+pub(crate) use crate::lexer::token::Token;
 
 mod token;
 
@@ -15,104 +14,82 @@ pub(crate) struct SpannedToken<'a> {
 }
 
 #[derive(Debug, Display)]
-pub(crate) enum LexerErrorKind {
+pub enum LexerErrorKind {
     #[display("unknown token")]
     UnknownToken,
-    #[display("unexpected end of file")]
-    UnexpectedEof,
-    #[display(
-        "unexpected token: expected one of {:?} but got {:?}",
-        expected_list.iter().join(", "),
-        got
-    )]
-    UnexpectedToken {
-        expected_list: &'static [Token<'static>],
-        got: Token<'static>,
-    },
 }
 
 #[derive(Debug, Display, Error)]
 #[display("lexer error at {:?}: {}", span, kind)]
 pub struct LexerError {
-    kind: LexerErrorKind,
-    span: Range<usize>,
+    pub kind: LexerErrorKind,
+    pub span: Range<usize>,
 }
 
 pub(crate) struct Lexer<'a> {
     /// The current token position the lexer is at.
     pos: usize,
-    /// The span that corresponds to the end of the file.
-    eof_span: Range<usize>,
     /// The list of all correctly lexed tokens.
     tokens: Vec<SpannedToken<'a>>,
 }
 
 impl<'a> Lexer<'a> {
     pub(crate) fn lex(source: &'a str) -> (Self, Vec<LexerError>) {
+        // create lexer
         let mut lex = Token::lexer(source);
+
+        // lex all tokens
         let mut errors = Vec::new();
         let mut tokens = Vec::new();
         while let Some(result) = lex.next() {
             let span = lex.span();
             if let Ok(token) = result {
-                trace!(?token, ?span, "lexed token");
                 tokens.push(SpannedToken { token, span })
             } else {
-                trace!(?span, "lexer encountered error");
                 errors.push(LexerError {
                     span,
                     kind: LexerErrorKind::UnknownToken,
                 })
             }
         }
-        (
-            Self {
-                pos: 0,
-                eof_span: source.len()..source.len(),
-                tokens,
-            },
-            errors,
-        )
+
+        // terminate with eof token
+        tokens.push(SpannedToken {
+            token: Token::Eof,
+            span: source.len()..source.len(),
+        });
+
+        (Self { pos: 0, tokens }, errors)
     }
 
-    pub(crate) fn next(&mut self) -> Result<&SpannedToken<'a>, LexerError> {
-        if let Some(token) = self.tokens.get(self.pos) {
+    pub(crate) fn next(&mut self) -> &SpannedToken<'a> {
+        let token = &self.tokens[self.pos];
+        if token.token != Token::Eof {
             self.pos += 1;
-            Ok(token)
-        } else {
-            Err(LexerError {
-                kind: LexerErrorKind::UnexpectedEof,
-                span: self.eof_span.clone(),
-            })
         }
+        token
     }
 
-    pub(crate) fn peek(&mut self) -> Option<&SpannedToken<'a>> {
-        self.tokens.get(self.pos)
-    }
-
-    pub(crate) fn consume(
-        &'a mut self,
-        expected_list: &'static [Token<'static>],
-    ) -> Result<&'a SpannedToken<'a>, LexerError> {
-        let next = self.next()?;
-        if expected_list.contains(&next.token) {
-            Ok(next)
-        } else {
-            let next = next.clone();
-            Err(LexerError {
-                kind: LexerErrorKind::UnexpectedToken {
-                    expected_list,
-                    got: next.token.into_static(),
-                },
-                span: next.span,
-            })
-        }
+    pub(crate) fn peek(&mut self) -> &SpannedToken<'a> {
+        self.tokens.get(self.pos).unwrap()
     }
 
     /// Advances the lexer.
     pub(crate) fn advance(&mut self) {
         self.pos += 1;
+    }
+
+    pub(crate) fn tokens(&self) -> &[SpannedToken<'a>] {
+        &self.tokens
+    }
+
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Checks if we arrived at the `Eof` token, or if we've surpassed it.
+    pub(crate) fn reached_eof(&self) -> bool {
+        self.pos >= self.tokens.len() || self.tokens[self.pos].token == Token::Eof
     }
 }
 
@@ -127,28 +104,28 @@ mod tests {
     #[test]
     fn lex_keywords() {
         let mut lexer = lex("create table database").0;
-        assert!(matches!(lexer.next().unwrap().token, Token::Create));
-        assert!(matches!(lexer.next().unwrap().token, Token::Table));
-        assert!(matches!(lexer.next().unwrap().token, Token::Database));
+        assert!(matches!(lexer.next().token, Token::Create));
+        assert!(matches!(lexer.next().token, Token::Table));
+        assert!(matches!(lexer.next().token, Token::Database));
     }
 
     #[test]
     fn lex_identifier() {
         let mut lexer = lex("users").0;
-        let tok = lexer.next().unwrap();
+        let tok = lexer.next();
         assert!(matches!(&tok.token, Token::Identifier(s) if s == "users"));
     }
 
     #[test]
     fn lex_integer_literal() {
         let mut lexer = lex("42").0;
-        assert!(matches!(&lexer.next().unwrap().token, Token::IntegerLiteral(s) if s == "42"));
+        assert!(matches!(&lexer.next().token, Token::IntegerLiteral(s) if s == "42"));
     }
 
     #[test]
     fn lex_string_literal_strips_quotes() {
         let mut lexer = lex(r#""hello""#).0;
-        assert!(matches!(&lexer.next().unwrap().token, Token::StringLiteral(s) if s == "hello"));
+        assert!(matches!(&lexer.next().token, Token::StringLiteral(s) if s == "hello"));
     }
 
     #[test]
@@ -160,26 +137,16 @@ mod tests {
     #[test]
     fn lex_span_is_correct() {
         let mut lexer = lex("create table").0;
-        let tok = lexer.next().unwrap();
+        let tok = lexer.next();
         assert_eq!(tok.span, 0..6);
-        let tok = lexer.next().unwrap();
+        let tok = lexer.next();
         assert_eq!(tok.span, 7..12);
     }
 
     #[test]
-    fn next_at_eof_returns_unexpected_eof() {
+    fn next_at_eof_returns_eof() {
         let mut lexer = lex("").0;
-        assert!(matches!(
-            lexer.next().unwrap_err().kind,
-            LexerErrorKind::UnexpectedEof
-        ));
-    }
-
-    #[test]
-    fn consume_wrong_token_returns_unexpected_token() {
-        let mut lexer = lex("table").0;
-        let err = lexer.consume(&[Token::Create]).unwrap_err();
-        assert!(matches!(err.kind, LexerErrorKind::UnexpectedToken { .. }));
+        assert!(matches!(lexer.next().token, Token::Eof));
     }
 
     #[test]
@@ -187,6 +154,6 @@ mod tests {
         let mut lexer = lex("create table").0;
         lexer.peek();
         lexer.peek();
-        assert!(matches!(lexer.next().unwrap().token, Token::Create));
+        assert!(matches!(lexer.next().token, Token::Create));
     }
 }
