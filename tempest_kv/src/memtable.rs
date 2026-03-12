@@ -38,7 +38,7 @@ impl<C: Comparer> MemTable<C> {
     pub(crate) fn insert(&mut self, key: InternalKey<C>, value: Bytes) {
         trace!(
             key_kind = ?key.trailer().kind(), key_len = key.key().len(),
-            key=?key.key(), ?value, seqnum=?key.trailer().seqnum(),
+            key=C::format(key.key().as_ref()), ?value, seqnum=?key.trailer().seqnum(),
             "inserting kv pair into memtable",
         );
         self.approximate_size += key.key().len() + value.len() + 16; // 16 for trailer + overhead

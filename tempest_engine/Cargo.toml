@@ -11,6 +11,7 @@ strum = { workspace = true }
 tracing = { workspace = true }
 
 tempest_core = { workspace = true }
+tempest_kv = { workspace = true }
 
 [dev-dependencies]
 tempest_core = { workspace = true, features = ["testing"] }

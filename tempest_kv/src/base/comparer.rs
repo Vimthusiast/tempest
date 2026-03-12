@@ -2,20 +2,22 @@
 
 use std::cmp;
 
+use tempest_core::utils::PrettyBytes;
+
 pub trait Comparer: Default + Clone + 'static {
     /// Returns the index where the version suffix starts.
     /// If there is no suffix, returns the length of the slice.
-    fn split(&self, key: &[u8]) -> usize;
+    fn split(key: &[u8]) -> usize;
 
     /// Compares the prefix part of two keys.
-    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
+    fn compare_prefix(a: &[u8], b: &[u8]) -> cmp::Ordering;
 
     /// Compares the suffix part of two keys.
-    fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering;
+    fn compare_suffix(a: &[u8], b: &[u8]) -> cmp::Ordering;
 
     /// Splits the key and returns the prefix and suffix part.
-    fn split_up<'a>(&self, key: &'a [u8]) -> (&'a [u8], &'a [u8]) {
-        let knon = self.split(key);
+    fn split_up<'a>(key: &'a [u8]) -> (&'a [u8], &'a [u8]) {
+        let knon = Self::split(key);
         key.split_at(knon)
     }
 
@@ -23,39 +25,46 @@ pub trait Comparer: Default + Clone + 'static {
     /// By default, this will compare the prefixes, but a different strategy may be chosen.
     /// This is used in things like key deduplication, e.g. during compaction, meaning
     /// any part that is ignored during logical compare will end up being overshadowed.
-    fn compare_logical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        let anon = self.split(a);
-        let bnon = self.split(b);
-        self.compare_prefix(&a[..anon], &b[..bnon])
+    fn compare_logical(a: &[u8], b: &[u8]) -> cmp::Ordering {
+        let anon = Self::split(a);
+        let bnon = Self::split(b);
+        Self::compare_prefix(&a[..anon], &b[..bnon])
     }
 
     /// Full comparison of two different keys, for physically ordering them in SSTs/MemTables.
     /// It first compares them ascending by the prefix, and then ascending by the suffix.
-    fn compare_physical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        let anon = self.split(a);
-        let bnon = self.split(b);
+    fn compare_physical(a: &[u8], b: &[u8]) -> cmp::Ordering {
+        let anon = Self::split(a);
+        let bnon = Self::split(b);
 
-        match self.compare_prefix(&a[..anon], &b[..bnon]) {
-            cmp::Ordering::Equal => self.compare_suffix(&a[anon..], &b[bnon..]),
+        match Self::compare_prefix(&a[..anon], &b[..bnon]) {
+            cmp::Ordering::Equal => Self::compare_suffix(&a[anon..], &b[bnon..]),
             ord => ord,
         }
     }
+
+    /// Format a key as a String.
+    fn format(key: &[u8]) -> String;
 }
 
 #[derive(Default, Clone)]
 pub struct DefaultComparer;
 
 impl Comparer for DefaultComparer {
-    fn split(&self, key: &[u8]) -> usize {
+    fn split(key: &[u8]) -> usize {
         key.len()
     }
 
-    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+    fn compare_prefix(a: &[u8], b: &[u8]) -> cmp::Ordering {
         a.cmp(b)
     }
 
-    fn compare_suffix(&self, _a: &[u8], _b: &[u8]) -> cmp::Ordering {
+    fn compare_suffix(_a: &[u8], _b: &[u8]) -> cmp::Ordering {
         cmp::Ordering::Equal
+    }
+
+    fn format(key: &[u8]) -> String {
+        format!("{:?}", PrettyBytes(key))
     }
 }
 
@@ -63,21 +72,21 @@ impl Comparer for DefaultComparer {
 pub struct AssertComparer<C: Comparer>(C);
 
 impl<C: Comparer> Comparer for AssertComparer<C> {
-    fn split(&self, key: &[u8]) -> usize {
-        self.0.split(key)
+    fn split(key: &[u8]) -> usize {
+        C::split(key)
     }
 
-    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        self.0.compare_prefix(a, b)
+    fn compare_prefix(a: &[u8], b: &[u8]) -> cmp::Ordering {
+        C::compare_prefix(a, b)
     }
 
-    fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
-        self.0.compare_suffix(a, b)
+    fn compare_suffix(a: &[u8], b: &[u8]) -> cmp::Ordering {
+        C::compare_suffix(a, b)
     }
 
-    fn compare_physical(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+    fn compare_physical(a: &[u8], b: &[u8]) -> cmp::Ordering {
         // compare the two keys completely (prefix and suffix)
-        let res = self.0.compare_physical(a, b);
+        let res = C::compare_physical(a, b);
 
         // check for anti-symmetry:
         // `a == b` implies `b == a`
@@ -85,15 +94,15 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
         // `a < b` implies `b > a`
         debug_assert_eq!(
             res,
-            self.0.compare_physical(b, a).reverse(),
+            C::compare_physical(b, a).reverse(),
             "anti-symmetry violation: compare(a,b) != reverse(compare(b,a))"
         );
 
         // check for consistency with prefix:
         // if a < b, then prefix(a) must be <= prefix(b)
-        let split_a = self.0.split(a);
-        let split_b = self.0.split(b);
-        let prefix_cmp = self.0.compare_prefix(&a[..split_a], &b[..split_b]);
+        let split_a = C::split(a);
+        let split_b = C::split(b);
+        let prefix_cmp = C::compare_prefix(&a[..split_a], &b[..split_b]);
 
         match prefix_cmp {
             cmp::Ordering::Less => {
@@ -115,7 +124,14 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
             }
         }
 
+        // NB: without state, we cannot check for transitivity, but we don't really need to here,
+        // but should do it in unit tests instead.
+
         res
+    }
+
+    fn format(key: &[u8]) -> String {
+        C::format(key)
     }
 }
 
@@ -129,16 +145,21 @@ impl<C: Comparer> Comparer for AssertComparer<C> {
 pub struct FixedSuffixComparer<const N: usize>;
 
 impl<const N: usize> Comparer for FixedSuffixComparer<N> {
-    fn split(&self, key: &[u8]) -> usize {
+    fn split(key: &[u8]) -> usize {
         key.len().saturating_sub(N)
     }
 
-    fn compare_prefix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+    fn compare_prefix(a: &[u8], b: &[u8]) -> cmp::Ordering {
         a.cmp(b)
     }
 
-    fn compare_suffix(&self, a: &[u8], b: &[u8]) -> cmp::Ordering {
+    fn compare_suffix(a: &[u8], b: &[u8]) -> cmp::Ordering {
         a.cmp(b)
+    }
+
+    fn format(key: &[u8]) -> String {
+        let (prefix, suffix) = Self::split_up(key);
+        format!("{:?} | {:?}", PrettyBytes(prefix), PrettyBytes(suffix))
     }
 }
 

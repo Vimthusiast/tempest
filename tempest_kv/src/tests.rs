@@ -1,5 +1,4 @@
 use tempest_core::{fio::VirtualFileSystem, test_utils::setup_tracing, utils::PrettyBytes};
-use tracing::{Instrument, Level};
 
 use crate::iterator::StorageIterator;
 

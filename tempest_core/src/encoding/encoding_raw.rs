@@ -26,43 +26,43 @@ impl BufPutRawExt for BytesMut {
 }
 
 #[derive(Debug, Display, Error, From)]
-pub enum DecodeError {
+pub enum RawDecodeError {
     UnexpectedEof,
     DecodeVarintError,
     FromUtf8Error(FromUtf8Error),
 }
 
 pub trait BufGetRawExt {
-    fn get_i64_raw(&mut self) -> Result<i64, DecodeError>;
-    fn get_bool_raw(&mut self) -> Result<bool, DecodeError>;
-    fn get_str_raw(&mut self) -> Result<String, DecodeError>;
+    fn get_i64_raw(&mut self) -> Result<i64, RawDecodeError>;
+    fn get_bool_raw(&mut self) -> Result<bool, RawDecodeError>;
+    fn get_str_raw(&mut self) -> Result<String, RawDecodeError>;
 }
 
 impl BufGetRawExt for Bytes {
-    fn get_i64_raw(&mut self) -> Result<i64, DecodeError> {
+    fn get_i64_raw(&mut self) -> Result<i64, RawDecodeError> {
         if self.len() < 8 {
-            return Err(DecodeError::UnexpectedEof);
+            return Err(RawDecodeError::UnexpectedEof);
         }
         Ok(self.get_i64())
     }
 
-    fn get_bool_raw(&mut self) -> Result<bool, DecodeError> {
+    fn get_bool_raw(&mut self) -> Result<bool, RawDecodeError> {
         if self.is_empty() {
-            return Err(DecodeError::UnexpectedEof);
+            return Err(RawDecodeError::UnexpectedEof);
         }
         Ok(self.get_u8() != 0)
     }
 
-    fn get_str_raw(&mut self) -> Result<String, DecodeError> {
+    fn get_str_raw(&mut self) -> Result<String, RawDecodeError> {
         let (len, bytes_read) =
-            decode_varint(self).ok_or_else(|| DecodeError::DecodeVarintError)?;
+            decode_varint(self).ok_or_else(|| RawDecodeError::DecodeVarintError)?;
         self.advance(bytes_read);
         if self.len() < len {
-            return Err(DecodeError::UnexpectedEof);
+            return Err(RawDecodeError::UnexpectedEof);
         }
         let bytes = self.split_to(len);
 
-        String::from_utf8(bytes.to_vec()).map_err(DecodeError::FromUtf8Error)
+        String::from_utf8(bytes.to_vec()).map_err(RawDecodeError::FromUtf8Error)
     }
 }
 
@@ -112,7 +112,7 @@ mod tests {
         let mut bytes = Bytes::from_static(&[0x00, 0x00]); // only 2 bytes, need 8
         assert!(matches!(
             bytes.get_i64_raw(),
-            Err(DecodeError::UnexpectedEof)
+            Err(RawDecodeError::UnexpectedEof)
         ));
     }
 
@@ -139,7 +139,7 @@ mod tests {
         let mut bytes = Bytes::new();
         assert!(matches!(
             bytes.get_bool_raw(),
-            Err(DecodeError::UnexpectedEof)
+            Err(RawDecodeError::UnexpectedEof)
         ));
     }
 
@@ -186,7 +186,7 @@ mod tests {
         let mut bytes = Bytes::new();
         assert!(matches!(
             bytes.get_str_raw(),
-            Err(DecodeError::DecodeVarintError)
+            Err(RawDecodeError::DecodeVarintError)
         ));
     }
 
@@ -199,7 +199,7 @@ mod tests {
         let mut bytes = buf.freeze();
         assert!(matches!(
             bytes.get_str_raw(),
-            Err(DecodeError::UnexpectedEof)
+            Err(RawDecodeError::UnexpectedEof)
         ));
     }
 

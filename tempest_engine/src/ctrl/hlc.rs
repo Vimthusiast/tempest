@@ -13,7 +13,9 @@
 /// implementation, by storing the HLC in the key-suffix.
 ///
 /// [`Comparer`]: tempest_kv::base::comparer::Comparer
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deref)]
+#[debug("{}.{}", self.counter(), self.millis())]
 pub struct HlcTimestamp(
     /// Packs the millis in the upper 48 bits and the counter in the lower 16 bits.
     u64,
@@ -33,6 +35,11 @@ impl HlcTimestamp {
     #[inline]
     pub const fn counter(&self) -> u16 {
         (self.0 & 0xFFFF) as u16
+    }
+
+    #[inline]
+    pub const fn from_u64(val: u64) -> Self {
+        Self(val)
     }
 }
 

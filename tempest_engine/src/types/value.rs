@@ -4,10 +4,10 @@ use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use strum::EnumDiscriminants;
 use tempest_core::encoding::{
-    BufGetLexicalExt, BufGetRawExt, BufPutLexicalExt, BufPutRawExt, DecodeError, LexicalDecodeError,
+    BufGetLexicalExt, BufGetRawExt, BufPutLexicalExt, BufPutRawExt, RawDecodeError, LexicalDecodeError,
 };
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, EnumDiscriminants)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, EnumDiscriminants)]
 #[strum_discriminants(name(TempestType), derive(Serialize, Deserialize))]
 #[repr(u8)]
 pub enum TempestValue<'a> {
@@ -33,7 +33,7 @@ impl<'a> TempestValue<'a> {
         }
     }
 
-    pub fn decode(buf: &mut Bytes, ty: TempestType) -> Result<TempestValue<'static>, DecodeError> {
+    pub fn decode(buf: &mut Bytes, ty: TempestType) -> Result<TempestValue<'static>, RawDecodeError> {
         match ty {
             TempestType::Int64 => buf.get_i64_raw().map(TempestValue::Int64),
             TempestType::Bool => buf.get_bool_raw().map(TempestValue::Bool),

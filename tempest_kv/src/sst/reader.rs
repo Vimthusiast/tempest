@@ -160,8 +160,7 @@ impl<F: FioFile, C: Comparer> SstReader<F, C> {
     #[instrument(skip(self), level = "trace")]
     pub async fn get(&self, key: &InternalKey<C, &[u8]>) -> StorageResult<Option<Bytes>> {
         // check bloom filter first - if definitely not present, skip
-        let c = C::default();
-        let (prefix, _) = c.split_up(key.key().as_ref());
+        let (prefix, _) = C::split_up(key.key().as_ref());
         if !self.bloom.maybe_contains(prefix) {
             trace!("bloom filter negative");
             return Ok(None);
