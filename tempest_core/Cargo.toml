@@ -7,17 +7,20 @@ edition = "2024"
 testing = ["dep:tracing-subscriber", "dep:tracing-tree"]
 
 [dependencies]
-tokio-uring = { workspace = true }
-futures = { workspace = true }
 async-trait = { workspace = true }
-tracing = { workspace = true }
-derive_more = { workspace = true }
-tokio = { workspace = true }
-bytes = { workspace = true }
-serde = { workspace = true }
 bincode = { workspace = true }
+bytes = { workspace = true }
 crc64 = { workspace = true }
+derive_more = { workspace = true }
+futures = { workspace = true }
+integer-encoding = { workspace = true }
+memchr = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tokio-uring = { workspace = true }
+tracing = { workspace = true }
 
+# optional dependencies, only used with certain features / in test builds
 tracing-subscriber = { workspace = true, optional = true }
 tracing-tree = { workspace = true, optional = true }
 

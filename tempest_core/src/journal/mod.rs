@@ -7,7 +7,7 @@ use std::{
 use bincode::Options;
 use bytes::{BufMut, BytesMut};
 use crc64::crc64;
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio_uring::buf::BoundedBuf;
 
@@ -453,7 +453,7 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
         Ok(())
     }
 
-    pub async fn maybe_rotate(&mut self) -> Result<(), JournalError> {
+    async fn maybe_rotate(&mut self) -> Result<(), JournalError> {
         let factored_filesize = (self.initial_filesize as f64 * self.config.growth_factor) as u64;
         if self.filepos >= u64::max(self.config.growth_baseline, factored_filesize) {
             self.rotate().await?;
@@ -462,7 +462,7 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
     }
 
     #[instrument(skip(self), fields(filesize=?ByteSize(self.filepos)))]
-    pub async fn rotate(&mut self) -> Result<(), JournalError> {
+    async fn rotate(&mut self) -> Result<(), JournalError> {
         // open a new file
         let filenum = self.current_filenum + 1;
         let filepath = Self::filepath(&self.dir, filenum);

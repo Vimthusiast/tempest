@@ -6,9 +6,11 @@ extern crate tracing;
 #[macro_use]
 extern crate derive_more;
 
+pub mod encoding;
 pub mod fio;
 pub mod journal;
 pub mod utils;
+pub mod tempest_str;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;

@@ -1,5 +1,4 @@
 use tempest_core::{fio::VirtualFileSystem, test_utils::setup_tracing, utils::PrettyBytes};
-use tracing::{Instrument, Level};
 
 use crate::iterator::StorageIterator;
 
@@ -374,7 +373,6 @@ fn test_storage_recovery_seqnum_visibility() {
                 Storage::<_, DefaultComparer>::init(id, fs.clone(), storage_dir, config.clone())
                     .await
                     .unwrap();
-            println!("{:#?}", silo);
 
             // This snapshot must be high enough to include the WAL-recovered entries.
             // Before the fix, highest_seqnum() returned the pre-recovery manifest value,

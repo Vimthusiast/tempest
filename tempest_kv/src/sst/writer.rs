@@ -105,8 +105,7 @@ impl<F: FioFile, C: Comparer> SstWriter<F, C> {
         value: &Bytes,
     ) -> StorageResult<()> {
         // insert user key into bloom filter
-        let c = C::default();
-        let (prefix, _) = c.split_up(key.key());
+        let (prefix, _) = C::split_up(key.key());
         self.bloom_builder.insert(prefix);
 
         // store the last key here to create the index (arc clone, so cheap)

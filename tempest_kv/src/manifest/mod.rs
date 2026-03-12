@@ -67,7 +67,7 @@ pub(crate) struct ManifestEditV1 {
     pub(crate) wal_filenums_removed: Option<Vec<u64>>,
 }
 
-/// A versioned list of edits to the [`SiloManifest`].
+/// A versioned edit to the [`StorageManifest`].
 #[repr(u16)]
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum ManifestEdit {
@@ -78,7 +78,7 @@ pub(crate) enum ManifestEdit {
 impl ManifestEdit {
     pub(crate) fn into_latest(self) -> ManifestEditV1 {
         match self {
-            ManifestEdit::V1(edit) => edit,
+            Self::V1(edit) => edit,
         }
     }
 }
@@ -201,7 +201,7 @@ impl Replayable for ManifestState {
 /// Manages reads and writes to the manifest.
 #[derive(Debug)]
 pub(crate) struct StorageManifest<F: FioFS> {
-    /// The root path of the silo this manifest belongs to.
+    /// The root path of the storage this manifest belongs to.
     silo_root: PathBuf,
 
     /// Next sequence number that will be used for a range allocation.

@@ -15,7 +15,6 @@ use bytes::Bytes;
 use nonmax::NonMaxU64;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
-use tempest_core::utils::PrettyBytes;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian, U64};
 
 pub mod comparer;
@@ -166,7 +165,7 @@ impl KeyTrailer {
 }
 
 #[derive(Debug, Clone)]
-#[debug("InternalKey(key={:?}, seqnum={:?}, kind={:?})", PrettyBytes(key.as_ref()), trailer.seqnum(), trailer.kind())]
+#[debug("InternalKey(key={}, seqnum={:?}, kind={:?})", C::format(key.as_ref()), trailer.seqnum(), trailer.kind())]
 pub struct InternalKey<C: Comparer = DefaultComparer, K: AsRef<[u8]> = Bytes> {
     key: K,
     trailer: KeyTrailer,
@@ -194,7 +193,7 @@ impl<C: Comparer, K: AsRef<[u8]>> InternalKey<C, K> {
         &self,
         other: &InternalKey<C, impl AsRef<[u8]>>,
     ) -> cmp::Ordering {
-        C::default().compare_logical(self.key().as_ref(), other.key().as_ref())
+        C::compare_logical(self.key().as_ref(), other.key().as_ref())
     }
 
     /// Converts this key to an `InternalKey<C, &[u8]>`, by slicing the key (borrow).
@@ -243,9 +242,7 @@ impl<C: Comparer, K: AsRef<[u8]>> cmp::PartialOrd for InternalKey<C, K> {
 
 impl<C: Comparer, K: AsRef<[u8]>> cmp::Ord for InternalKey<C, K> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        let c = C::default();
-
-        match c.compare_physical(self.key.as_ref(), other.key.as_ref()) {
+        match C::compare_physical(self.key.as_ref(), other.key.as_ref()) {
             cmp::Ordering::Equal => other.trailer.cmp(&self.trailer),
             ord => ord,
         }

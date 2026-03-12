@@ -1,0 +1,17 @@
+[package]
+name = "tempest_engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = { workspace = true }
+derive_more = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true }
+tracing = { workspace = true }
+
+tempest_core = { workspace = true }
+tempest_kv = { workspace = true }
+
+[dev-dependencies]
+tempest_core = { workspace = true, features = ["testing"] }

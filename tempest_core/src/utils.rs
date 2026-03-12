@@ -120,3 +120,9 @@ impl_hex!(HexI8, i8, u8);
 impl_hex!(HexI16, i16, u16);
 impl_hex!(HexI32, i32, u32);
 impl_hex!(HexI64, i64, u64);
+
+#[inline(always)]
+pub fn contains_null(v: impl AsRef<[u8]>) -> bool {
+    let v = v.as_ref();
+    memchr::memchr(0, v).is_some()
+}

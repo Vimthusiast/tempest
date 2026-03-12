@@ -36,9 +36,9 @@ impl Default for WalConfig {
 pub struct ManifestConfig {
     pub seqnum_limit_step: u64,
     pub filenum_limit_step: u64,
-    /// File grows beyond `initial_size * growth_factor` before rotation.
+
+    // -- journal config options, flattened --
     pub growth_factor: f64,
-    /// Minimum file size before the growth factor kicks in.
     pub growth_baseline: u64,
 }
 

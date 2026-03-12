@@ -326,7 +326,6 @@ where
 {
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>> {
         trace!(inner = type_name::<I>(), "polling deduplicating iterator");
-        let c = C::default();
         loop {
             match self.inner.poll_next(cx) {
                 Poll::Ready(Ok(Some(()))) => {
@@ -335,7 +334,7 @@ where
 
                     // if we have had a key already and the new one is logically equal
                     if let Some(last_key) = last_key
-                        && c.compare_logical(new_key.key(), last_key).is_eq()
+                        && C::compare_logical(new_key.key(), last_key).is_eq()
                     {
                         // skip this key
                         continue;
@@ -367,7 +366,7 @@ mod tests {
     use std::task::Context;
 
     // A simple mock iterator for testing
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct MockIterator<C: Comparer> {
         data: Vec<(InternalKey<C>, Bytes)>,
         pos: usize,
