@@ -549,11 +549,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempest"
-version = "0.1.0"
-dependencies = [
- "bytes",
-]
+name = "tempest-db"
+version = "0.0.1"
 
 [[package]]
 name = "tempest_core"
@@ -566,12 +563,25 @@ dependencies = [
  "derive_more",
  "futures",
  "integer-encoding",
+ "memchr",
  "serde",
  "tokio",
  "tokio-uring",
  "tracing",
  "tracing-subscriber",
  "tracing-tree",
+]
+
+[[package]]
+name = "tempest_engine"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "derive_more",
+ "serde",
+ "strum",
+ "tempest_core",
+ "tracing",
 ]
 
 [[package]]
@@ -596,17 +606,6 @@ dependencies = [
  "tracing-tree",
  "xxhash-rust",
  "zerocopy",
-]
-
-[[package]]
-name = "tempest_schema"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "derive_more",
- "serde",
- "strum",
- "tempest_core",
 ]
 
 [[package]]

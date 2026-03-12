@@ -1,12 +1,14 @@
 use std::borrow::Cow;
 
 use bytes::{Bytes, BytesMut};
+use serde::{Deserialize, Serialize};
+use strum::EnumDiscriminants;
 use tempest_core::encoding::{
     BufGetLexicalExt, BufGetRawExt, BufPutLexicalExt, BufPutRawExt, DecodeError, LexicalDecodeError,
 };
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, strum::EnumDiscriminants)]
-#[strum_discriminants(name(TempestType))]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, EnumDiscriminants)]
+#[strum_discriminants(name(TempestType), derive(Serialize, Deserialize))]
 #[repr(u8)]
 pub enum TempestValue<'a> {
     Int64(i64) = 0,

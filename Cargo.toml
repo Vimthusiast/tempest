@@ -2,16 +2,19 @@
 members = [
     "tempest_core",
     "tempest_kv",
-    "tempest_schema",
+    "tempest_engine",
 ]
 
 [package]
-name = "tempest"
-version = "0.1.0"
+name = "tempest-db"
+version = "0.0.1"
 edition = "2024"
 
+[[bin]]
+name = "tempest"
+path = "src/main.rs"
+
 [dependencies]
-bytes.workspace = true
 
 [workspace.dependencies]
 arc-swap = "1.8.2"
@@ -25,7 +28,9 @@ futures = "0.3.31"
 integer-encoding = "4.1.0"
 itertools = "0.14.0"
 logos = "0.16.1"
+memchr = "2.8.0"
 nonmax = { version = "0.5.5", features = ["serde"] }
+num_cpus = "1.17.0"
 num_enum = "0.7.5"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 smallvec = "1.15.1"
@@ -33,10 +38,9 @@ strum = { version = "0.27.2", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["rt", "macros", "sync", "rt-multi-thread", "time", "fs", "io-util", "signal"] }
 tokio-uring = { version = "0.5.0", features = ["bytes"] }
 tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
-tracing-tree = "0.4.1"
-zerocopy = { version = "0.8.39", features = ["derive", "std"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
-num_cpus = "1.17.0"
+tracing-tree = "0.4.1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+zerocopy = { version = "0.8.39", features = ["derive", "std"] }
 
 tempest_core = { path = "./tempest_core" }
