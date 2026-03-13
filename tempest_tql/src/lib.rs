@@ -270,4 +270,32 @@ mod tests {
         assert_eq!(stmt.table.database.name, "mydb");
         assert_eq!(stmt.table.table.name, "users");
     }
+
+    #[test]
+    fn test_select_all() {
+        let source = "select * from mydb.users;";
+        let (stmts, errors) = parse(source);
+        assert_no_errors(&errors);
+        let Stmt::SelectFrom(stmt) = &stmts[0] else {
+            panic!("expected select")
+        };
+        assert!(matches!(stmt.projection.kind, ProjectionKind::All));
+        assert_eq!(stmt.table.table.name, "users");
+    }
+
+    #[test]
+    fn test_select_columns() {
+        let source = "select id, username from mydb.users;";
+        let (stmts, errors) = parse(source);
+        assert_no_errors(&errors);
+        let Stmt::SelectFrom(stmt) = &stmts[0] else {
+            panic!("expected select")
+        };
+        let ProjectionKind::Columns(cols) = &stmt.projection.kind else {
+            panic!("expected columns")
+        };
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].name, "id");
+        assert_eq!(cols[1].name, "username");
+    }
 }

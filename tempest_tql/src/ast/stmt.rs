@@ -1,6 +1,6 @@
 use crate::{
     Parser, ParserError, ParserErrorKind,
-    ast::{CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, InsertIntoStmt},
+    ast::{CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, InsertIntoStmt, SelectFromStmt},
     lexer::Token,
 };
 
@@ -10,6 +10,7 @@ pub enum Stmt<'a> {
     CreateTable(CreateTableStmt<'a>),
     CreateTy(CreateTyStmt<'a>),
     InsertInto(InsertIntoStmt<'a>),
+    SelectFrom(SelectFromStmt<'a>),
 }
 
 impl<'a> Parser<'a> {
@@ -41,7 +42,7 @@ impl<'a> Parser<'a> {
         match stmt_start.token {
             Token::Create => self.parse_create_stmt(),
             Token::Insert => self.parse_insert_stmt().map(Stmt::InsertInto),
-            Token::Select => todo!("parse select statement"),
+            Token::Select => self.parse_select_stmt().map(Stmt::SelectFrom),
             _ => {
                 let err = Err(ParserError {
                     span: stmt_start.span.clone(),
