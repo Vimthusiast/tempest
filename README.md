@@ -61,8 +61,8 @@ type User {
     address  : Address,   // embedded type, no join required
 }
 
-// `create table` attaches storage to a type
-create table users : User {
+// `table` attaches storage to a type
+table users : User {
     primary key (id),
 }
 ```
@@ -70,7 +70,7 @@ create table users : User {
 The rules are, **user-defined types are PascalCase, builtins and keywords are lowercase,
 and `:` means "has type."**
 
-### Optional is honest about absence and enforces checks explicitly
+### Optional is honest about absence and enforces checks explicitly.
 
 `Int8?` is shorthand for `Optional(Int8)` - a value that is explicitly either `Some(x)` or
 `None`. There is no *implicit null*; actually there is no `NULL` at all. If a field can be absent,
@@ -94,10 +94,12 @@ where  age is Some(a) and a > 18;
 //              ^ binds the inner value to `a` only when present
 ```
 
-### Migrations that can't lie
+This 
+
+### Better Migrations
 
 Because new columns are `Optional` by default, adding a column to an existing table is always
-safe - existing rows get `None`, which is honest rather than a fabricated default.
+safe - existing rows get `None`.
 
 ```tql
 // Safe to run on a table with existing rows:
@@ -115,42 +117,6 @@ alter table users rename column username to handle;
 Because Tempest's manifest already records schema history, the database itself is the source of
 truth for how the schema has evolved - no external migration tool required.
 
-<!--
-### Custom types with behaviour
-
-Types can carry validation logic and custom ordering strategies, which map directly onto the
-storage layer's comparator infrastructure:
-
-```tql
-type EmailAddress(String) {
-    // Validates on insert; returns None if the value is malformed
-    fn new(raw: String) -> EmailAddress? {
-        match raw.contains("@") {
-            true  => Some(EmailAddress(raw)),
-            false => None,
-        }
-    }
-
-    // Custom ordering: sort by domain, then by local part
-    fn compare(a: EmailAddress, b: EmailAddress) -> Ordering {
-        a.split("@")[1].compare(b.split("@")[1])
-    }
-}
-
-type User {
-    id    : Int64,
-    email : EmailAddress,   // validation happens automatically on insert
-}
-
-create table users : User {
-    primary key (id),
-}
-
-// Uses the custom `compare` defined on EmailAddress
-select id, email from users order by email;
-```
--->
-
 ---
 
 ## Current Progress
@@ -162,7 +128,9 @@ select id, email from users order by email;
   directly into key suffixes for efficient ordering at the storage layer. Not yet implemented.
 - **Iterator Layer** - k-way merge iterators for the read path, collecting across MemTable
   and SST sources.
-- **TQL** - Design in progress. Parser and type system not yet implemented.
+- **Engine Layer** - hooks up the Key-Value storage, allowing for relational queries based on
+  a predefined schema.
+- **TQL** - Parser and type system in progress.
 
 ### Architecture note
 
