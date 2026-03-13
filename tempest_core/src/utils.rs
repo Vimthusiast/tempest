@@ -72,7 +72,7 @@ impl fmt::Debug for PrettyBytes<'_> {
         for &b in self.0 {
             match b {
                 // human readable symbols, alphabet, etc
-                b' '..b'~' => write!(f, "{}", b as char)?,
+                b' '..=b'~' => write!(f, "{}", b as char)?,
                 // other bytes, like enter/backspace/newline
                 _ => write!(f, "\\x{:02x}", b)?,
             }
