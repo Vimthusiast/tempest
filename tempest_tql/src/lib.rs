@@ -211,4 +211,22 @@ mod tests {
         assert_eq!(body.fields.len(), 2);
         assert_eq!(statements.len(), 1);
     }
+
+    #[test]
+    fn test_create_database_works_after_error_sync() {
+        // finds IDENTIFIER ("garbage"), then syncs up to `;`
+        let source = "garbage code; create database main;";
+
+        let (statements, errors) = parse(source);
+        assert!(matches!(
+            errors[0].kind,
+            ParserErrorKind::UnexpectedToken { .. }
+        ));
+        assert_eq!(errors.len(), 1);
+
+        let Stmt::CreateDatabase(CreateDatabaseStmt { name, .. }) = &statements[0] else {
+            panic!("invalid statement type: {:?}", &statements[0]);
+        };
+        assert_eq!(name.name, "main");
+    }
 }
