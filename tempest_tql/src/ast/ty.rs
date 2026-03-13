@@ -9,8 +9,8 @@ pub struct TyPath<'a> {
     ///
     /// # Note
     ///
-    /// In the future, this will be a `Vec<>`, and allow for qualified paths, but we don't have
-    /// modules or anything right now, and won't during the MVP phase.
+    /// In the future, this will be a `Vec<Ident>`, and allow for qualified paths, but we don't
+    /// have modules or anything right now, and won't during the MVP phase.
     pub name: Ident<'a>,
 }
 
@@ -61,8 +61,8 @@ impl<'a> Parser<'a> {
         let span_start = self.consume(&[Token::LBrace])?.span.start;
         let mut fields = Vec::new();
         loop {
-            let next = self.lexer.peek();
-            match next.token {
+            let tok = self.lexer.peek();
+            match tok.token {
                 Token::Identifier(_) => {
                     let field = match self.parse_ty_decl_field() {
                         Ok(f) => f,
@@ -77,17 +77,21 @@ impl<'a> Parser<'a> {
                 Token::Comma => self.lexer.advance(),
                 Token::RBrace => break,
                 _ => {
-                    self.errors.push(ParserError {
-                        span: next.span.clone(),
+                    let err = ParserError {
+                        span: tok.span.clone(),
                         kind: ParserErrorKind::UnexpectedToken {
                             expected_list: &[
                                 Token::Identifier(Cow::Borrowed("")),
                                 Token::Comma,
                                 Token::RBrace,
                             ],
-                            got: next.token.clone().into_static(),
+                            got: tok.token.clone().into_static(),
                         },
-                    });
+                    };
+                    if tok.token == Token::Eof {
+                        return Err(err);
+                    }
+                    self.errors.push(err);
                     self.sync();
                 }
             }

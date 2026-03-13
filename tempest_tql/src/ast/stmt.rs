@@ -1,6 +1,6 @@
 use crate::{
     Parser, ParserError, ParserErrorKind,
-    ast::{CreateDatabaseStmt, CreateTableStmt, CreateTyStmt},
+    ast::{CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, InsertIntoStmt},
     lexer::Token,
 };
 
@@ -9,22 +9,23 @@ pub enum Stmt<'a> {
     CreateDatabase(CreateDatabaseStmt<'a>),
     CreateTable(CreateTableStmt<'a>),
     CreateTy(CreateTyStmt<'a>),
+    InsertInto(InsertIntoStmt<'a>),
 }
 
 impl<'a> Parser<'a> {
     pub(crate) fn parse_create_stmt(&mut self) -> Result<Stmt<'a>, ParserError> {
         self.current_span.start = self.consume(&[Token::Create])?.span.start;
-        let next = self.lexer.peek();
+        let tok = self.lexer.peek();
 
-        match next.token {
+        match tok.token {
             Token::Database => self.parse_create_database_stmt().map(Stmt::CreateDatabase),
             Token::Table => self.parse_create_table_stmt().map(Stmt::CreateTable),
             Token::Type => self.parse_create_ty_stmt().map(Stmt::CreateTy),
             _ => Err(ParserError {
-                span: next.span.clone(),
+                span: tok.span.clone(),
                 kind: ParserErrorKind::UnexpectedToken {
                     expected_list: &[Token::Database, Token::Table, Token::Type],
-                    got: next.token.clone().into_static(),
+                    got: tok.token.clone().into_static(),
                 },
             }),
         }
@@ -39,7 +40,7 @@ impl<'a> Parser<'a> {
 
         match stmt_start.token {
             Token::Create => self.parse_create_stmt(),
-            Token::Insert => todo!("parse insert statement"),
+            Token::Insert => self.parse_insert_stmt().map(Stmt::InsertInto),
             Token::Select => todo!("parse select statement"),
             _ => {
                 let err = Err(ParserError {

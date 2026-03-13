@@ -65,17 +65,16 @@ impl<'a> Parser<'a> {
         &mut self,
         expected_list: &'static [Token<'static>],
     ) -> Result<&SpannedToken<'a>, ParserError> {
-        let next = self.lexer.next();
-        if expected_list.contains(&next.token) {
-            self.current_span.end = next.span.end;
-            Ok(next)
+        let tok = self.lexer.next();
+        if expected_list.contains(&tok.token) {
+            self.current_span.end = tok.span.end;
+            Ok(tok)
         } else {
-            let next = next.clone();
             Err(ParserError {
-                span: next.span,
+                span: tok.span.clone(),
                 kind: ParserErrorKind::UnexpectedToken {
                     expected_list,
-                    got: next.token.into_static(),
+                    got: tok.token.clone().into_static(),
                 },
             })
         }
@@ -173,17 +172,18 @@ mod tests {
 
     #[test]
     fn test_create_table() {
-        let source = "create table users : User {
+        let source = "create table mydb.users : User {
             primary key (id),
         };";
 
         let (statements, errors) = parse(source);
         assert_no_errors(&errors);
-        let Stmt::CreateTable(CreateTableStmt { name, ty, body, .. }) = &statements[0] else {
+        let Stmt::CreateTable(CreateTableStmt { path, ty, body, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(name.name, "users");
-        assert_eq!(ty.name, "User");
+        assert_eq!(path.database.name, "mydb");
+        assert_eq!(path.table.name, "users");
+        assert_eq!(ty.name.name, "User");
         assert_eq!(body.primary_key.columns[0].name, "id");
         assert_eq!(body.primary_key.columns.len(), 1);
         assert_eq!(statements.len(), 1);
@@ -228,5 +228,46 @@ mod tests {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
         assert_eq!(name.name, "main");
+    }
+
+    #[test]
+    fn test_parse_insert_value() {
+        let source = "insert into mydb.users { id: 42 };";
+        let (stmts, errors) = parse(source);
+        assert_no_errors(&errors);
+        let Stmt::InsertInto(stmt) = &stmts[0] else {
+            panic!("expected insert")
+        };
+        assert_eq!(stmt.values.values[0].column.name, "id");
+        assert!(
+            matches!(stmt.values.values[0].value.kind, ExprKind::IntegerLiteral(ref s) if s == "42")
+        );
+    }
+
+    #[test]
+    fn test_parse_insert_value_list_multiple() {
+        let source = r#"insert into mydb.users { id: 1, username: "john" };"#;
+        let (stmts, errors) = parse(source);
+        assert_no_errors(&errors);
+        let Stmt::InsertInto(stmt) = &stmts[0] else {
+            panic!("expected insert")
+        };
+        assert_eq!(stmt.values.values.len(), 2);
+        assert_eq!(stmt.values.values[1].column.name, "username");
+        assert!(
+            matches!(stmt.values.values[1].value.kind, ExprKind::StringLiteral(ref s) if s == "john")
+        );
+    }
+
+    #[test]
+    fn test_parse_insert_stmt_table_path() {
+        let source = "insert into mydb.users { id: 1 };";
+        let (stmts, errors) = parse(source);
+        assert_no_errors(&errors);
+        let Stmt::InsertInto(stmt) = &stmts[0] else {
+            panic!("expected insert")
+        };
+        assert_eq!(stmt.table.database.name, "mydb");
+        assert_eq!(stmt.table.table.name, "users");
     }
 }

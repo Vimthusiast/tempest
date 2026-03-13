@@ -20,13 +20,17 @@ impl<'a> Parser<'a> {
                     span: tok.span.clone(),
                 })
             }
-            _ => Err(ParserError {
-                span: tok.span.clone(),
-                kind: ParserErrorKind::UnexpectedToken {
-                    expected_list: &[Token::Identifier(Cow::Borrowed(""))],
-                    got: tok.token.clone().into_static(),
-                },
-            }),
+            _ => {
+                let err = Err(ParserError {
+                    span: tok.span.clone(),
+                    kind: ParserErrorKind::UnexpectedToken {
+                        expected_list: &[Token::Identifier(Cow::Borrowed(""))],
+                        got: tok.token.clone().into_static(),
+                    },
+                });
+                self.lexer.advance();
+                err
+            }
         }
     }
 }

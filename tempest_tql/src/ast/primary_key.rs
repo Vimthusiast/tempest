@@ -33,13 +33,10 @@ impl<'a> Parser<'a> {
                         },
                     };
                     if tok.token == Token::Eof {
-                        // exit on eof
                         return Err(err);
-                    } else {
-                        // try to go further
-                        self.errors.push(err);
-                        self.sync();
                     }
+                    self.errors.push(err);
+                    self.sync();
                 }
             }
         }
