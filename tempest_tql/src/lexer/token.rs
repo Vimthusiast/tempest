@@ -89,6 +89,9 @@ pub enum Token<'a> {
     #[strum(serialize = "`:`")]
     #[token(":")]
     Colon,
+    #[strum(serialize = "`::`")]
+    #[token("::")]
+    DoubleColon,
     #[strum(serialize = "`;`")]
     #[token(";")]
     Semicolon,
@@ -135,12 +138,47 @@ pub enum Token<'a> {
 impl<'a> Token<'a> {
     pub(crate) fn into_static(self) -> Token<'static> {
         match self {
+            Self::Create => Token::Create,
+            Self::Database => Token::Database,
+            Self::Table => Token::Table,
+            Self::Type => Token::Type,
+            Self::Primary => Token::Primary,
+            Self::Key => Token::Key,
+            Self::Insert => Token::Insert,
+            Self::Into => Token::Into,
+            Self::Values => Token::Values,
+
+            Self::Select => Token::Select,
+            Self::From => Token::From,
+            Self::Where => Token::Where,
+            Self::And => Token::And,
+            Self::Or => Token::Or,
+
+            Self::True => Token::True,
+            Self::False => Token::False,
+
+            Self::LParen => Token::LParen,
+            Self::RParen => Token::RParen,
+            Self::LBrace => Token::LBrace,
+            Self::RBrace => Token::RBrace,
+            Self::Dot => Token::Dot,
+            Self::Comma => Token::Comma,
+            Self::Colon => Token::Colon,
+            Self::DoubleColon => Token::DoubleColon,
+            Self::Semicolon => Token::Semicolon,
+
+            Self::Asterisk => Token::Asterisk,
+            Self::Eq => Token::Eq,
+            Self::Gt => Token::Gt,
+            Self::Lt => Token::Lt,
+            Self::Gte => Token::Gte,
+            Self::Lte => Token::Lte,
+
             Self::Identifier(ident) => Token::Identifier(Cow::Owned(ident.into_owned())),
             Self::IntegerLiteral(lit) => Token::IntegerLiteral(Cow::Owned(lit.into_owned())),
             Self::StringLiteral(lit) => Token::StringLiteral(Cow::Owned(lit.into_owned())),
-            // SAFETY: all the other variants are not bound to 'a, so it's safe to transmute the
-            // lifetime here, to avoid having to spell out all the other variants
-            other => unsafe { std::mem::transmute(other) },
+
+            Self::Eof => Token::Eof,
         }
     }
 

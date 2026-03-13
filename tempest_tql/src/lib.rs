@@ -19,9 +19,9 @@ pub enum ParserErrorKind {
     #[display("lexer error: {}", _0)]
     LexerError(LexerErrorKind),
     #[display(
-        "unexpected token: expected one of {} but got {:?}",
+        "unexpected token: expected one of {} but got {}",
         expected_list.iter().map(|t| t.name()).join(", "),
-        got
+        got.name()
     )]
     UnexpectedToken {
         expected_list: &'static [Token<'static>],
@@ -72,28 +72,35 @@ impl<'a> Parser<'a> {
         } else {
             let next = next.clone();
             Err(ParserError {
+                span: next.span,
                 kind: ParserErrorKind::UnexpectedToken {
                     expected_list,
                     got: next.token.into_static(),
                 },
-                span: next.span,
             })
         }
     }
 
+    /// Sync up to the next parsing restart point on errors.
     fn sync(&mut self) {
-        match self.lexer.tokens()[self.lexer.pos().saturating_sub(1)].token {
-            Token::Semicolon | Token::RBrace | Token::RParen | Token::Comma | Token::Eof => return,
-            _ => {}
-        }
-
         loop {
             match self.lexer.peek().token {
-                Token::Semicolon | Token::RBrace | Token::RParen | Token::Comma => {
+                // consume, nobody upstream wants this
+                Token::Semicolon => {
                     self.lexer.advance();
                     break;
                 }
-                Token::Eof => break,
+
+                // break but do not consume, parent context owns these
+                Token::RBrace
+                | Token::RParen
+                | Token::Comma
+                | Token::Create
+                | Token::Select
+                | Token::Insert
+                | Token::Eof => break,
+
+                // skip everything else
                 _ => self.lexer.advance(),
             }
         }
@@ -131,7 +138,19 @@ pub fn parse<'a>(source: &'a str) -> (Vec<Stmt<'a>>, Vec<ParserError>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::ast::*;
+
     use super::*;
+
+    /// If `errors` is not empty, prints them using the `Display` implementation, and `panic!`s.
+    fn assert_no_errors(errors: &[ParserError]) {
+        if !errors.is_empty() {
+            for err in errors {
+                eprintln!("{}", err);
+            }
+            panic!("there should not be any errors, but got {}", errors.len());
+        }
+    }
 
     #[test]
     fn consume_wrong_token_returns_unexpected_token() {
@@ -144,34 +163,52 @@ mod tests {
     fn test_create_database() {
         let source = "create database mydb;";
         let (statements, errors) = parse(source);
-        assert!(
-            errors.is_empty(),
-            "there should not be errors, but got: {:?}",
-            errors
-        );
-        assert!(matches!(&statements[0], Stmt::CreateDatabase { name, .. }
-            if name.name == "mydb"));
+        assert_no_errors(&errors);
+        let Stmt::CreateDatabase(CreateDatabaseStmt { name, .. }) = &statements[0] else {
+            panic!("invalid statement type: {:?}", &statements[0]);
+        };
+        assert_eq!(name.name, "mydb");
         assert_eq!(statements.len(), 1);
     }
 
     #[test]
     fn test_create_table() {
         let source = "create table users : User {
-            primary key (id)
+            primary key (id),
         };";
 
         let (statements, errors) = parse(source);
-        assert!(
-            errors.is_empty(),
-            "there should not be errors, but got: {:?}",
-            errors
-        );
-        assert!(
-            matches!(&statements[0], Stmt::CreateTable { name, ty, body, .. }
-                if name.name == "users" && ty.name == "User"
-                // validate table body has correct primary key definition
-                && body.primary_key.columns[0].name == "id" && body.primary_key.columns.len() == 1)
-        );
+        assert_no_errors(&errors);
+        let Stmt::CreateTable(CreateTableStmt { name, ty, body, .. }) = &statements[0] else {
+            panic!("invalid statement type: {:?}", &statements[0]);
+        };
+        assert_eq!(name.name, "users");
+        assert_eq!(ty.name, "User");
+        assert_eq!(body.primary_key.columns[0].name, "id");
+        assert_eq!(body.primary_key.columns.len(), 1);
+        assert_eq!(statements.len(), 1);
+    }
+
+    #[test]
+    fn test_create_type() {
+        let source = "create type User {
+            id       : Int64,
+            username : String,
+        };";
+
+        let (statements, errors) = parse(source);
+        assert_no_errors(&errors);
+
+        let Stmt::CreateTy(CreateTyStmt { name, body, .. }) = &statements[0] else {
+            panic!("invalid statement type: {:?}", &statements[0]);
+        };
+
+        assert_eq!(name.name, "User");
+        assert_eq!(body.fields[0].name.name, "id");
+        assert_eq!(body.fields[0].ty.name.name, "Int64");
+        assert_eq!(body.fields[1].name.name, "username");
+        assert_eq!(body.fields[1].ty.name.name, "String");
+        assert_eq!(body.fields.len(), 2);
         assert_eq!(statements.len(), 1);
     }
 }
