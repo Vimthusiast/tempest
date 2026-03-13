@@ -79,14 +79,6 @@ impl<'a> Lexer<'a> {
         self.pos += 1;
     }
 
-    pub(crate) fn tokens(&self) -> &[SpannedToken<'a>] {
-        &self.tokens
-    }
-
-    pub(crate) fn pos(&self) -> usize {
-        self.pos
-    }
-
     /// Checks if we arrived at the `Eof` token, or if we've surpassed it.
     pub(crate) fn reached_eof(&self) -> bool {
         self.pos >= self.tokens.len() || self.tokens[self.pos].token == Token::Eof
