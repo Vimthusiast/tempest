@@ -137,7 +137,7 @@ impl VirtualFileSystem {
     /// Panics if any of the internal files are still accesses.
     ///
     /// [`Level::DEBUG`]: tracing::Level::DEBUG
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     pub fn debug(&self) {
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;

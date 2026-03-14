@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use tempest_core::tempest_str::TempestStr;
+
 use crate::{Parser, ParserError, ast::Ident, lexer::Token};
 
 /// A `Path` may either resolve to a fully qualified path of database + name, or just the name.
@@ -8,6 +10,17 @@ pub struct Path<'a> {
     pub span: Range<usize>,
     pub database: Option<Ident<'a>>,
     pub name: Ident<'a>,
+}
+
+impl<'a> Path<'a> {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn for_testing(database: Option<TempestStr<'a>>, name: TempestStr<'a>) -> Self {
+        Self {
+            span: 0..0,
+            database: database.map(Ident::for_testing),
+            name: Ident::for_testing(name),
+        }
+    }
 }
 
 impl<'a> Parser<'a> {

@@ -1,11 +1,20 @@
-use std::{borrow::Cow, ops::Range};
+use std::ops::Range;
+
+use tempest_core::tempest_str::TempestStr;
 
 use crate::{Parser, ParserError, ParserErrorKind, lexer::Token};
 
 #[derive(Debug)]
 pub struct Ident<'a> {
-    pub name: Cow<'a, str>,
     pub span: Range<usize>,
+    pub name: TempestStr<'a>,
+}
+
+impl<'a> Ident<'a> {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn for_testing(name: TempestStr<'a>) -> Self {
+        Self { span: 0..0, name }
+    }
 }
 
 impl<'a> Parser<'a> {
@@ -23,10 +32,7 @@ impl<'a> Parser<'a> {
             _ => {
                 let err = Err(ParserError {
                     span: tok.span.clone(),
-                    kind: ParserErrorKind::UnexpectedToken {
-                        expected_list: &[Token::Identifier(Cow::Borrowed(""))],
-                        got: tok.token.clone().into_static(),
-                    },
+                    kind: ParserErrorKind::unexpected_token(&[Token::empty_ident()], &tok.token),
                 });
                 self.lexer.advance();
                 err

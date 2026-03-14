@@ -48,15 +48,15 @@ impl<'a> Parser<'a> {
             }),
             _ => Err(ParserError {
                 span: tok.span.clone(),
-                kind: ParserErrorKind::UnexpectedToken {
-                    expected_list: &[
-                        Token::IntegerLiteral(Cow::Borrowed("")),
-                        Token::StringLiteral(Cow::Borrowed("")),
+                kind: ParserErrorKind::unexpected_token(
+                    &[
+                        Token::empty_ident(),
+                        Token::empty_string(),
                         Token::True,
                         Token::False,
                     ],
-                    got: tok.token.clone().into_static(),
-                },
+                    &tok.token,
+                ),
             }),
         }
     }

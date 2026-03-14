@@ -24,10 +24,10 @@ impl<'a> Parser<'a> {
             Token::Type => self.parse_create_ty_stmt().map(Stmt::CreateTy),
             _ => Err(ParserError {
                 span: tok.span.clone(),
-                kind: ParserErrorKind::UnexpectedToken {
-                    expected_list: &[Token::Database, Token::Table, Token::Type],
-                    got: tok.token.clone().into_static(),
-                },
+                kind: ParserErrorKind::unexpected_token(
+                    &[Token::Database, Token::Table, Token::Type],
+                    &tok.token,
+                ),
             }),
         }
     }
@@ -46,10 +46,10 @@ impl<'a> Parser<'a> {
             _ => {
                 let err = Err(ParserError {
                     span: stmt_start.span.clone(),
-                    kind: ParserErrorKind::UnexpectedToken {
-                        expected_list: &[Token::Create, Token::Insert, Token::Select],
-                        got: stmt_start.token.clone().into_static(),
-                    },
+                    kind: ParserErrorKind::unexpected_token(
+                        &[Token::Create, Token::Insert, Token::Select],
+                        &stmt_start.token,
+                    ),
                 });
                 self.sync();
                 err

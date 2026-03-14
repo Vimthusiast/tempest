@@ -658,6 +658,7 @@ dependencies = [
  "itertools",
  "logos",
  "strum",
+ "tempest_core",
  "tracing",
 ]
 

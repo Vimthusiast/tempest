@@ -153,6 +153,44 @@ impl CatalogState {
 
         Ok((id, CatalogEdit::V1(CatalogEditV1::CreateType((id, schema)))))
     }
+
+    pub(crate) fn get_database_by_name(
+        &self,
+        name: &TempestStr,
+    ) -> Option<(DatabaseId, &DatabaseSchema)> {
+        for (&id, schema) in &self.databases {
+            if schema.name == *name {
+                return Some((id, schema));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn get_table_by_name(
+        &self,
+        database_id: DatabaseId,
+        name: &TempestStr,
+    ) -> Option<(TableId, &TableSchema)> {
+        for (&id, schema) in &self.tables {
+            if schema.database_id == database_id && schema.name == *name {
+                return Some((id, schema));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn get_type_by_name(
+        &self,
+        database_id: DatabaseId,
+        name: &TempestStr,
+    ) -> Option<(TypeId, &TypeSchema)> {
+        for (&id, schema) in &self.types {
+            if schema.database_id == database_id && schema.name == *name {
+                return Some((id, schema));
+            }
+        }
+        None
+    }
 }
 
 impl Replayable for CatalogState {
@@ -282,6 +320,14 @@ impl<F: FioFS> Catalog<F> {
         self.journal.append(edit).await?;
         Ok(id)
     }
+
+    #[instrument(skip_all, level = "info")]
+    pub async fn create_type(&mut self, schema: TypeSchema) -> Result<TypeId, CatalogError> {
+        let (id, edit) = self.create_type_edit(schema)?;
+        debug!("persisting type schema to journal");
+        self.journal.append(edit).await?;
+        Ok(id)
+    }
 }
 
 // Allow for accessing the current state, like the databases, tables, etc., directly through the
@@ -291,5 +337,63 @@ impl<F: FioFS> Deref for Catalog<F> {
 
     fn deref(&self) -> &Self::Target {
         &self.journal.state()
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        catalog::schema::{FieldDef, FieldId},
+        types::TempestType,
+    };
+
+    use super::*;
+    pub(crate) fn create_catalog_state_for_testing() -> CatalogState {
+        let mut state = CatalogState::initial();
+
+        let (db_id, edit) = state
+            .create_database_edit(DatabaseSchema::new("main".into()))
+            .unwrap();
+        state.apply(edit);
+
+        // create a type
+        let mut fields = BTreeMap::new();
+        fields.insert(
+            FieldId(0),
+            FieldDef {
+                name: "id".into(),
+                ty: TempestType::Int64,
+            },
+        );
+        fields.insert(
+            FieldId(1),
+            FieldDef {
+                name: "name".into(),
+                ty: TempestType::String,
+            },
+        );
+        let (type_id, edit) = state
+            .create_type_edit(TypeSchema {
+                database_id: db_id,
+                name: "User".into(),
+                fields,
+            })
+            .unwrap();
+        state.apply(edit);
+
+        // create a table
+        let (_, edit) = state
+            .create_table_edit(TableSchema {
+                database_id: db_id,
+                name: "users".into(),
+                type_id,
+                primary_key: vec![FieldId(0)],
+            })
+            .unwrap();
+        state.apply(edit);
+
+        state
     }
 }

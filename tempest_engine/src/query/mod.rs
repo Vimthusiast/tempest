@@ -1,5 +1,6 @@
 pub(crate) mod plan;
 pub(crate) mod exec;
+pub(crate) mod resolve;
 
 #[derive(Debug)]
 pub enum QueryResult {

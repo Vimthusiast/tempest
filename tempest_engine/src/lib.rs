@@ -61,9 +61,16 @@ impl<F: FioFS> Engine<F> {
 
     async fn execute_plan(&self, plan: PlanNode) -> Result<QueryResult, EngineError> {
         match plan {
-            PlanNode::CreateDatabase { name } => {
-                let schema = DatabaseSchema::new(name);
+            PlanNode::CreateDatabase(schema) => {
                 self.catalog.write().await.create_database(schema).await?;
+                Ok(QueryResult::Empty)
+            }
+            PlanNode::CreateType(schema) => {
+                self.catalog.write().await.create_type(schema).await?;
+                Ok(QueryResult::Empty)
+            }
+            PlanNode::CreateTable(schema) => {
+                self.catalog.write().await.create_table(schema).await?;
                 Ok(QueryResult::Empty)
             }
         }
@@ -102,5 +109,13 @@ mod tests {
         let config = EngineConfig::default();
         let engine = Engine::open(fs, root, config).await.unwrap();
         engine.execute("create database main;").await.unwrap();
+        engine
+            .execute("create type main.User { id: Int64, username: String };")
+            .await
+            .unwrap();
+        engine
+            .execute("create table main.users : main.User { primary key (id) };")
+            .await
+            .unwrap();
     }
 }

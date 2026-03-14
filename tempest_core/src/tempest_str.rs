@@ -42,6 +42,15 @@ impl<'a> TempestStr<'a> {
         Ok(TempestStr(s.into()))
     }
 
+    /// Constructs a [`TempestStr`] borrowing from `s`.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `s` does not contain any null byte.
+    pub const unsafe fn from_borrowed_unchecked(s: &'a str) -> TempestStr<'a> {
+        Self(Cow::Borrowed(s))
+    }
+
     /// Constructs a [`TempestStr`] from an owned [`String`], yielding a `'static` lifetime.
     ///
     /// # Errors

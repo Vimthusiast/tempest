@@ -53,14 +53,10 @@ impl<'a> Parser<'a> {
                 _ => {
                     let err = ParserError {
                         span: tok.span.clone(),
-                        kind: ParserErrorKind::UnexpectedToken {
-                            expected_list: &[
-                                Token::Identifier(Cow::Borrowed("")),
-                                Token::Comma,
-                                Token::RBrace,
-                            ],
-                            got: tok.token.clone().into_static(),
-                        },
+                        kind: ParserErrorKind::unexpected_token(
+                            &[Token::empty_ident(), Token::Comma, Token::RBrace],
+                            &tok.token,
+                        ),
                     };
                     if tok.token == Token::Eof {
                         return Err(err);

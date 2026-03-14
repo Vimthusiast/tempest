@@ -13,7 +13,7 @@ pub(crate) struct SpannedToken<'a> {
     pub span: Range<usize>,
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Error)]
 pub enum LexerErrorKind {
     #[display("unknown token")]
     UnknownToken,

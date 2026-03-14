@@ -27,10 +27,10 @@ impl<'a> Parser<'a> {
                 _ => {
                     let err = ParserError {
                         span: tok.span.clone(),
-                        kind: ParserErrorKind::UnexpectedToken {
-                            expected_list: &[Token::Primary, Token::RBrace],
-                            got: tok.token.clone().into_static(),
-                        },
+                        kind: ParserErrorKind::unexpected_token(
+                            &[Token::Primary, Token::RBrace],
+                            &tok.token,
+                        ),
                     };
                     if tok.token == Token::Eof {
                         return Err(err);

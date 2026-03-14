@@ -14,23 +14,35 @@ extern crate tracing;
 pub mod ast;
 pub mod lexer;
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Error)]
 pub enum ParserErrorKind {
     #[display("lexer error: {}", _0)]
     LexerError(LexerErrorKind),
-    #[display(
-        "unexpected token: expected one of {} but got {}",
-        expected_list.iter().map(|t| t.name()).join(", "),
-        got.name()
-    )]
-    UnexpectedToken {
-        expected_list: &'static [Token<'static>],
-        got: Token<'static>,
-    },
+    #[display("unexpected token: {}", _0)]
+    UnexpectedToken(#[error(not(source))] String),
     #[display("duplicate primary key")]
     DuplicatePrimaryKey,
     #[display("missing primary key")]
     MissingPrimaryKey,
+}
+
+impl ParserErrorKind {
+    pub(crate) fn unexpected_token(expected_list: &[Token], got: &Token) -> Self {
+        debug_assert_ne!(expected_list.len(), 0, "supply a list of expected tokens");
+        if expected_list.len() == 1 {
+            Self::UnexpectedToken(format!(
+                "expected {}, but got {}",
+                expected_list[0].name(),
+                got.name()
+            ))
+        } else {
+            Self::UnexpectedToken(format!(
+                "expected one of: {}, but got {}",
+                expected_list.iter().map(|t| t.name()).join(", "),
+                got.name()
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Display, Error)]
@@ -63,7 +75,7 @@ impl<'a> Parser<'a> {
     /// returns a [`ParserError`] of kind [`ParserErrorKind::UnexpectedToken`].
     pub(crate) fn consume(
         &mut self,
-        expected_list: &'static [Token<'static>],
+        expected_list: &[Token],
     ) -> Result<&SpannedToken<'a>, ParserError> {
         let tok = self.lexer.next();
         if expected_list.contains(&tok.token) {
@@ -72,10 +84,7 @@ impl<'a> Parser<'a> {
         } else {
             Err(ParserError {
                 span: tok.span.clone(),
-                kind: ParserErrorKind::UnexpectedToken {
-                    expected_list,
-                    got: tok.token.clone().into_static(),
-                },
+                kind: ParserErrorKind::unexpected_token(expected_list, &tok.token),
             })
         }
     }
@@ -155,7 +164,7 @@ mod tests {
     fn consume_wrong_token_returns_unexpected_token() {
         let mut parser = Parser::new("table");
         let err = parser.consume(&[Token::Create]).unwrap_err();
-        assert!(matches!(err.kind, ParserErrorKind::UnexpectedToken { .. }));
+        assert!(matches!(err.kind, ParserErrorKind::UnexpectedToken(_)));
     }
 
     #[test]
@@ -235,14 +244,14 @@ mod tests {
         let (statements, errors) = parse(source);
         assert!(matches!(
             errors[0].kind,
-            ParserErrorKind::UnexpectedToken { .. }
+            ParserErrorKind::UnexpectedToken(_),
         ));
         assert_eq!(errors.len(), 1);
 
         let Stmt::CreateDatabase(CreateDatabaseStmt { name, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(name.name, "main");
+        assert_eq!(name.name, "main".into());
     }
 
     #[test]
@@ -253,7 +262,7 @@ mod tests {
         let Stmt::InsertInto(stmt) = &stmts[0] else {
             panic!("expected insert")
         };
-        assert_eq!(stmt.values.values[0].column.name, "id");
+        assert_eq!(stmt.values.values[0].column.name, "id".into());
         assert!(
             matches!(stmt.values.values[0].value.kind, ExprKind::IntegerLiteral(ref s) if s == "42")
         );
@@ -268,7 +277,7 @@ mod tests {
             panic!("expected insert")
         };
         assert_eq!(stmt.values.values.len(), 2);
-        assert_eq!(stmt.values.values[1].column.name, "username");
+        assert_eq!(stmt.values.values[1].column.name, "username".into());
         assert!(
             matches!(stmt.values.values[1].value.kind, ExprKind::StringLiteral(ref s) if s == "john")
         );
@@ -282,8 +291,8 @@ mod tests {
         let Stmt::InsertInto(stmt) = &stmts[0] else {
             panic!("expected insert")
         };
-        assert_eq!(stmt.table.database.as_ref().unwrap().name, "mydb");
-        assert_eq!(stmt.table.name.name, "users");
+        assert_eq!(stmt.table.database.as_ref().unwrap().name, "mydb".into());
+        assert_eq!(stmt.table.name.name, "users".into());
     }
 
     #[test]
@@ -295,7 +304,7 @@ mod tests {
             panic!("expected select")
         };
         assert!(matches!(stmt.projection.kind, ProjectionKind::All));
-        assert_eq!(stmt.table.name.name, "users");
+        assert_eq!(stmt.table.name.name, "users".into());
     }
 
     #[test]
@@ -310,7 +319,7 @@ mod tests {
             panic!("expected columns")
         };
         assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].name, "id");
-        assert_eq!(cols[1].name, "username");
+        assert_eq!(cols[0].name, "id".into());
+        assert_eq!(cols[1].name, "username".into());
     }
 }

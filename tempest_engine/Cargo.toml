@@ -18,3 +18,4 @@ tempest_tql = { workspace = true }
 
 [dev-dependencies]
 tempest_core = { workspace = true, features = ["testing"] }
+tempest_tql = { workspace = true, features = ["testing"] }
