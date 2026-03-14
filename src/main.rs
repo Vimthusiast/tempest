@@ -2,8 +2,20 @@ use std::path::PathBuf;
 
 use tempest_core::fio::UringFileSystem;
 use tempest_engine::{Engine, config::EngineConfig};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_tree::HierarchicalLayer;
 
 fn main() {
+    let layer = HierarchicalLayer::default()
+        .with_indent_lines(true)
+        .with_bracketed_fields(true)
+        .with_targets(true);
+
+    tracing_subscriber::registry()
+        .with(layer)
+        .with(EnvFilter::from_default_env())
+        .init();
+
     tokio_uring::start(async {
         let fs = UringFileSystem;
         let root = PathBuf::from("./tmp/tempest");

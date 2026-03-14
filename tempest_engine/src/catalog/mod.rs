@@ -241,6 +241,10 @@ impl Replayable for CatalogState {
             CatalogEdit::V1(CatalogEditV1::CreateDatabase((id.clone(), schema.clone())))
         }));
 
+        edits.extend(self.types.iter().map(|(id, schema)| {
+            CatalogEdit::V1(CatalogEditV1::CreateType((id.clone(), schema.clone())))
+        }));
+
         edits.extend(self.tables.iter().map(|(id, schema)| {
             CatalogEdit::V1(CatalogEditV1::CreateTable((id.clone(), schema.clone())))
         }));

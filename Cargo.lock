@@ -594,6 +594,8 @@ dependencies = [
  "tempest_engine",
  "tokio",
  "tokio-uring",
+ "tracing-subscriber",
+ "tracing-tree",
 ]
 
 [[package]]
