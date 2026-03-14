@@ -65,7 +65,7 @@ pub(crate) fn resolve_type(
     ))
 }
 
-pub(crate) fn resolve<'a>(
+pub(crate) fn resolve_table<'a>(
     path: &Path,
     // when we implement session state / `use`, we may supply a database scope as context
     // scope: Option<DatabaseId>,
@@ -100,7 +100,7 @@ mod tests {
     fn resolve_basic() {
         let state = create_catalog_state_for_testing();
         let path = Path::for_testing(Some("main".into()), "users".into());
-        let resolved = resolve(&path, &state).unwrap();
+        let resolved = resolve_table(&path, &state).unwrap();
         assert_eq!(resolved.id, TableId(0));
         assert_eq!(resolved.fields.len(), 2);
     }
@@ -110,7 +110,7 @@ mod tests {
         let state = create_catalog_state_for_testing();
         let path = Path::for_testing(Some("missing".into()), "users".into());
         assert!(matches!(
-            resolve(&path, &state),
+            resolve_table(&path, &state),
             Err(ResolveError::DatabaseNotFound(_))
         ));
     }
@@ -120,7 +120,7 @@ mod tests {
         let state = create_catalog_state_for_testing();
         let path = Path::for_testing(Some("main".into()), "missing".into());
         assert!(matches!(
-            resolve(&path, &state),
+            resolve_table(&path, &state),
             Err(ResolveError::TableNotFound(_))
         ));
     }
@@ -130,7 +130,7 @@ mod tests {
         let state = create_catalog_state_for_testing();
         let path = Path::for_testing(None, "users".into());
         assert!(matches!(
-            resolve(&path, &state),
+            resolve_table(&path, &state),
             Err(ResolveError::UnqualifiedPath)
         ));
     }

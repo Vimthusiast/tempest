@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
-use strum::{EnumDiscriminants, EnumString};
+use strum::{EnumDiscriminants, EnumString, IntoStaticStr};
 use tempest_core::encoding::{
     BufGetLexicalExt, BufGetRawExt, BufPutLexicalExt, BufPutRawExt, LexicalDecodeError,
     RawDecodeError,
@@ -11,7 +11,7 @@ use tempest_core::encoding::{
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, EnumDiscriminants)]
 #[strum_discriminants(
     name(TempestType),
-    derive(Serialize, Deserialize, EnumString),
+    derive(Serialize, Deserialize, EnumString, IntoStaticStr),
     strum(serialize_all = "PascalCase")
 )]
 #[repr(u8)]
@@ -70,6 +70,12 @@ impl<'a> TempestValue<'a> {
                 .get_str_lexical()
                 .map(|s| TempestValue::String(Cow::Owned(s))),
         }
+    }
+}
+
+impl TempestType {
+    pub fn name(&self) -> &'static str {
+        self.into()
     }
 }
 

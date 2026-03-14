@@ -1,16 +1,25 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use derive_more::{Display, Error, From};
 use itertools::Itertools;
+use strum::IntoDiscriminant;
 use tempest_core::{fio::FioFS, tempest_str::TempestStr};
-use tempest_tql::ast::{CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, Stmt};
+use tempest_tql::ast::{
+    CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, Expr, InsertIntoStmt, Stmt,
+};
 
 use crate::{
     catalog::{
         Catalog, CatalogError,
-        schema::{DatabaseId, DatabaseSchema, FieldDef, FieldId, TableSchema, TypeId, TypeSchema},
+        schema::{DatabaseSchema, FieldDef, FieldId, TableId, TableSchema, TypeSchema},
     },
-    query::resolve::{ResolveError, resolve_database, resolve_type, resolve_type_schema},
+    query::{
+        eval::eval,
+        resolve::{
+            ResolveError, resolve_database, resolve_table, resolve_type, resolve_type_schema,
+        },
+    },
+    types::{TempestType, TempestValue},
 };
 
 #[derive(Debug, Display, From, Error)]
@@ -19,14 +28,30 @@ pub enum PlanError {
     CatalogError(CatalogError),
     #[display("resolve error: {}", _0)]
     ResolveError(ResolveError),
+    #[from(skip)]
     #[display("field with the name '{}' not found on type", _0)]
     FieldNotFound(#[error(not(source))] TempestStr<'static>),
+    #[from(skip)]
+    #[display("field supplied named '{}' not found on type", _0)]
+    UnknownField(#[error(not(source))] TempestStr<'static>),
+    #[from(skip)]
+    #[display("missing field named '{}' for creating this type", _0)]
+    MissingField(#[error(not(source))] TempestStr<'static>),
+    #[display("type mismatch: expected value of type {}, but got value of type {}", expected.name(), got.name())]
+    TypeMismatch {
+        expected: TempestType,
+        got: TempestType,
+    },
 }
 
 pub(crate) enum PlanNode {
     CreateDatabase(DatabaseSchema),
     CreateType(TypeSchema),
     CreateTable(TableSchema),
+    Insert {
+        table_id: TableId,
+        row: Vec<TempestValue<'static>>,
+    },
 }
 
 pub(crate) struct Planner<'a, F: FioFS> {
@@ -97,12 +122,60 @@ impl<'a, F: FioFS> Planner<'a, F> {
         }))
     }
 
+    pub(crate) fn plan_insert_into<'b>(
+        &self,
+        stmt: InsertIntoStmt<'b>,
+    ) -> Result<PlanNode, PlanError> {
+        let table = resolve_table(&stmt.table, self.catalog)?;
+
+        let supplied: HashMap<&TempestStr<'b>, &Expr> = stmt
+            .values
+            .values
+            .iter()
+            .map(|v| (&v.column.name, &v.value))
+            .collect();
+
+        // check for unknown fields
+        for &name in supplied.keys() {
+            if !table.fields.values().any(|f| &f.name == name) {
+                return Err(PlanError::UnknownField(name.clone().into_owned()));
+            }
+        }
+
+        // build row in field order
+        let mut row = Vec::new();
+        for (_, def) in table.fields {
+            // evaluate the expression for this field from the supplied value list
+            let expr = supplied
+                .get(&def.name)
+                .ok_or_else(|| PlanError::MissingField(def.name.clone().into_owned()))?;
+            let value = eval(expr);
+
+            // type check
+            if value.discriminant() != def.ty {
+                return Err(PlanError::TypeMismatch {
+                    expected: def.ty,
+                    got: value.discriminant(),
+                });
+            }
+
+            // push the final value
+            row.push(value);
+        }
+
+        Ok(PlanNode::Insert {
+            table_id: table.id,
+            row,
+        })
+    }
+
     // TODO: how to do planning with multiple statements in a row, like in transactions?
     pub(crate) fn plan(&self, stmt: Stmt<'_>) -> Result<PlanNode, PlanError> {
         match stmt {
             Stmt::CreateDatabase(stmt) => self.plan_create_database(stmt),
             Stmt::CreateTy(stmt) => self.plan_create_type(stmt),
             Stmt::CreateTable(stmt) => self.plan_create_table(stmt),
+            Stmt::InsertInto(stmt) => self.plan_insert_into(stmt),
             _ => todo!("plan statement {:?}", stmt),
         }
     }

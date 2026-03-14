@@ -1,7 +1,7 @@
 use std::{borrow::Cow, ops::Range};
 
 use crate::{
-    Parser, ParserError, ParserErrorKind,
+    Parser, ParseError, ParserErrorKind,
     ast::{Ident, Path},
     lexer::Token,
 };
@@ -27,7 +27,7 @@ pub struct CreateTyStmt<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_ty_decl_field(&mut self) -> Result<TyDeclField<'a>, ParserError> {
+    pub(crate) fn parse_ty_decl_field(&mut self) -> Result<TyDeclField<'a>, ParseError> {
         let name = self.parse_ident()?;
         self.consume(&[Token::Colon])?;
         let ty = self.parse_path()?;
@@ -39,7 +39,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_ty_decl_body(&mut self) -> Result<TyDeclBody<'a>, ParserError> {
+    fn parse_ty_decl_body(&mut self) -> Result<TyDeclBody<'a>, ParseError> {
         let span_start = self.consume(&[Token::LBrace])?.span.start;
         let mut fields = Vec::new();
         loop {
@@ -59,7 +59,7 @@ impl<'a> Parser<'a> {
                 Token::Comma => self.lexer.advance(),
                 Token::RBrace => break,
                 _ => {
-                    let err = ParserError {
+                    let err = ParseError {
                         span: tok.span.clone(),
                         kind: ParserErrorKind::unexpected_token(
                             &[Token::empty_ident(), Token::Comma, Token::RBrace],
@@ -82,7 +82,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Assumes that `create` has already been parsed and the span is set.
-    pub(crate) fn parse_create_ty_stmt(&mut self) -> Result<CreateTyStmt<'a>, ParserError> {
+    pub(crate) fn parse_create_ty_stmt(&mut self) -> Result<CreateTyStmt<'a>, ParseError> {
         self.consume(&[Token::Type])?;
         let path = self.parse_path()?;
         let body = self.parse_ty_decl_body()?;

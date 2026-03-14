@@ -74,7 +74,7 @@ fn read_varint(src: &[u8]) -> Option<(usize, usize)> {
 
 impl<F: FioFS, C: Comparer> Storage<F, C> {
     #[instrument(skip(fs, root_dir), level = "info")]
-    pub(crate) async fn init(
+    pub async fn init(
         id: u64,
         fs: F,
         root_dir: impl Into<PathBuf>,

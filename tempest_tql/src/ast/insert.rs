@@ -1,7 +1,7 @@
-use std::{borrow::Cow, ops::Range};
+use std::ops::Range;
 
 use crate::{
-    Parser, ParserError, ParserErrorKind,
+    ParseError, Parser, ParserErrorKind,
     ast::{Expr, Ident, Path},
     lexer::Token,
 };
@@ -27,7 +27,7 @@ pub struct InsertIntoStmt<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn parse_insert_value(&mut self) -> Result<InsertValue<'a>, ParserError> {
+    fn parse_insert_value(&mut self) -> Result<InsertValue<'a>, ParseError> {
         let column = self.parse_ident()?;
         self.consume(&[Token::Colon])?;
         let value = self.parse_expr()?;
@@ -38,7 +38,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(crate) fn parse_insert_value_list(&mut self) -> Result<InsertValueList<'a>, ParserError> {
+    pub(crate) fn parse_insert_value_list(&mut self) -> Result<InsertValueList<'a>, ParseError> {
         let span_start = self.consume(&[Token::LBrace])?.span.start;
         let mut values = Vec::new();
         loop {
@@ -51,7 +51,7 @@ impl<'a> Parser<'a> {
                 Token::Comma => self.lexer.advance(),
                 Token::RBrace => break,
                 _ => {
-                    let err = ParserError {
+                    let err = ParseError {
                         span: tok.span.clone(),
                         kind: ParserErrorKind::unexpected_token(
                             &[Token::empty_ident(), Token::Comma, Token::RBrace],
@@ -75,7 +75,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(crate) fn parse_insert_stmt(&mut self) -> Result<InsertIntoStmt<'a>, ParserError> {
+    pub(crate) fn parse_insert_stmt(&mut self) -> Result<InsertIntoStmt<'a>, ParseError> {
         self.current_span.start = self.consume(&[Token::Insert])?.span.start;
         self.consume(&[Token::Into])?;
         let table = self.parse_path()?;

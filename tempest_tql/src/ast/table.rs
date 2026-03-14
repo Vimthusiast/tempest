@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use crate::{
-    Parser, ParserError, ParserErrorKind,
+    Parser, ParseError, ParserErrorKind,
     ast::{Path, PrimaryKey},
     lexer::Token,
 };
@@ -21,7 +21,7 @@ pub struct CreateTableStmt<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_table_decl_body(&mut self) -> Result<TableDeclBody<'a>, ParserError> {
+    pub(crate) fn parse_table_decl_body(&mut self) -> Result<TableDeclBody<'a>, ParseError> {
         let body_span_start = self.consume(&[Token::LBrace])?.span.start;
         let mut primary_key = None;
         loop {
@@ -29,7 +29,7 @@ impl<'a> Parser<'a> {
             match tok.token {
                 Token::Primary => {
                     if primary_key.is_some() {
-                        self.errors.push(ParserError {
+                        self.errors.push(ParseError {
                             span: tok.span.clone(),
                             kind: ParserErrorKind::DuplicatePrimaryKey,
                         });
@@ -49,7 +49,7 @@ impl<'a> Parser<'a> {
                 Token::Comma => self.lexer.advance(),
                 Token::RBrace => break,
                 _ => {
-                    let err = ParserError {
+                    let err = ParseError {
                         span: tok.span.clone(),
                         kind: ParserErrorKind::unexpected_token(
                             &[Token::Primary, Token::Comma, Token::RBrace],
@@ -68,7 +68,7 @@ impl<'a> Parser<'a> {
 
         Ok(TableDeclBody {
             span: body_span_start..body_span_end,
-            primary_key: primary_key.ok_or_else(|| ParserError {
+            primary_key: primary_key.ok_or_else(|| ParseError {
                 // TODO: use the whole span, or just the end of the body?
                 span: self.current_span.clone(),
                 kind: ParserErrorKind::MissingPrimaryKey,
@@ -77,7 +77,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Assumes that `create` has already been parsed and the span is set.
-    pub(crate) fn parse_create_table_stmt(&mut self) -> Result<CreateTableStmt<'a>, ParserError> {
+    pub(crate) fn parse_create_table_stmt(&mut self) -> Result<CreateTableStmt<'a>, ParseError> {
         self.consume(&[Token::Table])?;
         let path = self.parse_path()?;
         let _colon = self.consume(&[Token::Colon])?;

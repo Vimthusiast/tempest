@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{Parser, ParserError, ParserErrorKind, ast::Ident, lexer::Token};
+use crate::{Parser, ParseError, ParserErrorKind, ast::Ident, lexer::Token};
 
 #[derive(Debug)]
 pub struct PrimaryKey<'a> {
@@ -9,7 +9,7 @@ pub struct PrimaryKey<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_primary_key(&mut self) -> Result<PrimaryKey<'a>, ParserError> {
+    pub(crate) fn parse_primary_key(&mut self) -> Result<PrimaryKey<'a>, ParseError> {
         let span_start = self.consume(&[Token::Primary])?.span.start;
         self.consume(&[Token::Key])?;
         self.consume(&[Token::LParen])?;
@@ -25,7 +25,7 @@ impl<'a> Parser<'a> {
                 Token::Comma => self.lexer.advance(),
                 Token::RParen => break,
                 _ => {
-                    let err = ParserError {
+                    let err = ParseError {
                         span: tok.span.clone(),
                         kind: ParserErrorKind::unexpected_token(
                             &[Token::Primary, Token::RBrace],

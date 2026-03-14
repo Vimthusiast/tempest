@@ -41,7 +41,7 @@ impl StorageHandle {
         rx.await?
     }
 
-    pub(crate) async fn shutdown(&self) -> StorageResult<()> {
+    pub async fn shutdown(&self) -> StorageResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(StorageCommand::Shutdown { respond_to: tx })

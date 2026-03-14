@@ -589,6 +589,12 @@ dependencies = [
 [[package]]
 name = "tempest-db"
 version = "0.0.1"
+dependencies = [
+ "tempest_core",
+ "tempest_engine",
+ "tokio",
+ "tokio-uring",
+]
 
 [[package]]
 name = "tempest_core"

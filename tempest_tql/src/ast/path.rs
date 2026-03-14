@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use tempest_core::tempest_str::TempestStr;
 
-use crate::{Parser, ParserError, ast::Ident, lexer::Token};
+use crate::{Parser, ParseError, ast::Ident, lexer::Token};
 
 /// A `Path` may either resolve to a fully qualified path of database + name, or just the name.
 #[derive(Debug)]
@@ -24,7 +24,7 @@ impl<'a> Path<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_path(&mut self) -> Result<Path<'a>, ParserError> {
+    pub(crate) fn parse_path(&mut self) -> Result<Path<'a>, ParseError> {
         let first = self.parse_ident()?;
         if self.lexer.peek().token == Token::Dot {
             self.consume(&[Token::Dot])?;

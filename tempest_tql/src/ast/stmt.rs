@@ -1,5 +1,5 @@
 use crate::{
-    Parser, ParserError, ParserErrorKind,
+    Parser, ParseError, ParserErrorKind,
     ast::{CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, InsertIntoStmt, SelectFromStmt},
     lexer::Token,
 };
@@ -14,7 +14,7 @@ pub enum Stmt<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_create_stmt(&mut self) -> Result<Stmt<'a>, ParserError> {
+    pub(crate) fn parse_create_stmt(&mut self) -> Result<Stmt<'a>, ParseError> {
         self.current_span.start = self.consume(&[Token::Create])?.span.start;
         let tok = self.lexer.peek();
 
@@ -22,7 +22,7 @@ impl<'a> Parser<'a> {
             Token::Database => self.parse_create_database_stmt().map(Stmt::CreateDatabase),
             Token::Table => self.parse_create_table_stmt().map(Stmt::CreateTable),
             Token::Type => self.parse_create_ty_stmt().map(Stmt::CreateTy),
-            _ => Err(ParserError {
+            _ => Err(ParseError {
                 span: tok.span.clone(),
                 kind: ParserErrorKind::unexpected_token(
                     &[Token::Database, Token::Table, Token::Type],
@@ -32,7 +32,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub(crate) fn parse_stmt(&mut self) -> Result<Stmt<'a>, ParserError> {
+    pub(crate) fn parse_stmt(&mut self) -> Result<Stmt<'a>, ParseError> {
         // start a new span
         self.current_span = 0..0;
 
@@ -44,7 +44,7 @@ impl<'a> Parser<'a> {
             Token::Insert => self.parse_insert_stmt().map(Stmt::InsertInto),
             Token::Select => self.parse_select_stmt().map(Stmt::SelectFrom),
             _ => {
-                let err = Err(ParserError {
+                let err = Err(ParseError {
                     span: stmt_start.span.clone(),
                     kind: ParserErrorKind::unexpected_token(
                         &[Token::Create, Token::Insert, Token::Select],

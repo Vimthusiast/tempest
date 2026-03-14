@@ -47,13 +47,13 @@ impl ParserErrorKind {
 
 #[derive(Debug, Display, Error)]
 #[display("parser error at {:?}: {}", span, kind)]
-pub struct ParserError {
+pub struct ParseError {
     span: Range<usize>,
     kind: ParserErrorKind,
 }
 
 // flatten the lexer error's span into the parser error
-impl From<LexerError> for ParserError {
+impl From<LexerError> for ParseError {
     fn from(value: LexerError) -> Self {
         Self {
             span: value.span,
@@ -65,7 +65,7 @@ impl From<LexerError> for ParserError {
 pub(crate) struct Parser<'a> {
     lexer: Lexer<'a>,
     statements: Vec<Stmt<'a>>,
-    errors: Vec<ParserError>,
+    errors: Vec<ParseError>,
     current_span: Range<usize>,
 }
 
@@ -76,13 +76,13 @@ impl<'a> Parser<'a> {
     pub(crate) fn consume(
         &mut self,
         expected_list: &[Token],
-    ) -> Result<&SpannedToken<'a>, ParserError> {
+    ) -> Result<&SpannedToken<'a>, ParseError> {
         let tok = self.lexer.next();
         if expected_list.contains(&tok.token) {
             self.current_span.end = tok.span.end;
             Ok(tok)
         } else {
-            Err(ParserError {
+            Err(ParseError {
                 span: tok.span.clone(),
                 kind: ParserErrorKind::unexpected_token(expected_list, &tok.token),
             })
@@ -114,7 +114,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_all(mut self) -> (Vec<Stmt<'a>>, Vec<ParserError>) {
+    fn parse_all(mut self) -> (Vec<Stmt<'a>>, Vec<ParseError>) {
         while !self.lexer.reached_eof() {
             match self.parse_stmt() {
                 Ok(stmt) => self.statements.push(stmt),
@@ -140,7 +140,7 @@ impl<'a> Parser<'a> {
 }
 
 #[instrument(skip_all, level = "debug")]
-pub fn parse<'a>(source: &'a str) -> (Vec<Stmt<'a>>, Vec<ParserError>) {
+pub fn parse<'a>(source: &'a str) -> (Vec<Stmt<'a>>, Vec<ParseError>) {
     Parser::new(source).parse_all()
 }
 
@@ -151,7 +151,7 @@ mod tests {
     use super::*;
 
     /// If `errors` is not empty, prints them using the `Display` implementation, and `panic!`s.
-    fn assert_no_errors(errors: &[ParserError]) {
+    fn assert_no_errors(errors: &[ParseError]) {
         if !errors.is_empty() {
             for err in errors {
                 eprintln!("{}", err);

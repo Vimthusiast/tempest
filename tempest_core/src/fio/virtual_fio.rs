@@ -139,9 +139,9 @@ impl VirtualFileSystem {
     /// [`Level::DEBUG`]: tracing::Level::DEBUG
     #[cfg(any(test, feature = "testing"))]
     pub fn debug(&self) {
-        if !tracing::enabled!(tracing::Level::DEBUG) {
-            return;
-        }
+        //if !tracing::enabled!(tracing::Level::DEBUG) {
+        //    return;
+        //}
 
         println!("-- Virtual File System {:p} --", Arc::as_ptr(&self.files));
         let files = self.files.try_read().expect("vfs not locked");
