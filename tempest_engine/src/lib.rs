@@ -53,7 +53,7 @@ impl<F: FioFS> Engine<F> {
         Ok(Self {
             root,
             fs,
-            // TODO: make catalog thread-safe through partial locking
+            // TODO: make catalog thread-safe through internal partial locking / channels
             catalog: Arc::new(RwLock::new(catalog)),
             config,
         })
@@ -76,6 +76,7 @@ impl<F: FioFS> Engine<F> {
         }
 
         // TODO: group transactions here or in ast?
+        // => ast as `transaction { ... }` seems good
         let mut results = Vec::new();
         for stmt in stmts {
             let catalog = self.catalog.read().await;

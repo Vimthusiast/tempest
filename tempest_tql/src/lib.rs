@@ -181,8 +181,8 @@ mod tests {
         let Stmt::CreateTable(CreateTableStmt { path, ty, body, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(path.database.name, "mydb");
-        assert_eq!(path.table.name, "users");
+        assert_eq!(path.database.as_ref().unwrap().name, "mydb");
+        assert_eq!(path.name.name, "users");
         assert_eq!(ty.name.name, "User");
         assert_eq!(body.primary_key.columns[0].name, "id");
         assert_eq!(body.primary_key.columns.len(), 1);
@@ -199,17 +199,32 @@ mod tests {
         let (statements, errors) = parse(source);
         assert_no_errors(&errors);
 
-        let Stmt::CreateTy(CreateTyStmt { name, body, .. }) = &statements[0] else {
+        let Stmt::CreateTy(CreateTyStmt { path, body, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
 
-        assert_eq!(name.name, "User");
+        assert_eq!(path.name.name, "User");
         assert_eq!(body.fields[0].name.name, "id");
         assert_eq!(body.fields[0].ty.name.name, "Int64");
         assert_eq!(body.fields[1].name.name, "username");
         assert_eq!(body.fields[1].ty.name.name, "String");
         assert_eq!(body.fields.len(), 2);
         assert_eq!(statements.len(), 1);
+    }
+
+    #[test]
+    fn test_create_type_qualified_path() {
+        let source = "create type main.User { id: Int64 };";
+
+        let (statements, errors) = parse(source);
+        assert_no_errors(&errors);
+
+        let Stmt::CreateTy(CreateTyStmt { path, .. }) = &statements[0] else {
+            panic!("invalid statement type: {:?}", &statements[0]);
+        };
+
+        assert_eq!(path.database.as_ref().unwrap().name, "main");
+        assert_eq!(path.name.name, "User");
     }
 
     #[test]
@@ -267,8 +282,8 @@ mod tests {
         let Stmt::InsertInto(stmt) = &stmts[0] else {
             panic!("expected insert")
         };
-        assert_eq!(stmt.table.database.name, "mydb");
-        assert_eq!(stmt.table.table.name, "users");
+        assert_eq!(stmt.table.database.as_ref().unwrap().name, "mydb");
+        assert_eq!(stmt.table.name.name, "users");
     }
 
     #[test]
@@ -280,7 +295,7 @@ mod tests {
             panic!("expected select")
         };
         assert!(matches!(stmt.projection.kind, ProjectionKind::All));
-        assert_eq!(stmt.table.table.name, "users");
+        assert_eq!(stmt.table.name.name, "users");
     }
 
     #[test]

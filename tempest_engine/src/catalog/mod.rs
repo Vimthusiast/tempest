@@ -9,7 +9,7 @@ use tempest_core::{
 };
 
 use crate::{
-    catalog::schema::{DatabaseId, DatabaseSchema, TableId, TableSchema},
+    catalog::schema::{DatabaseId, DatabaseSchema, TableId, TableSchema, TypeId, TypeSchema},
     config::CatalogConfig,
 };
 
@@ -29,6 +29,8 @@ pub(crate) enum CatalogEditV1 {
     CreateDatabase((DatabaseId, DatabaseSchema)),
     /// Registers a new table with its assigned [`TableId`].
     CreateTable((TableId, TableSchema)),
+    /// Registers a new type with its assigned [`TypeId`].
+    CreateType((TypeId, TypeSchema)),
     /// A point-in-time snapshot of the full catalog state, written on journal
     /// rotation. Contains only live entries - dropped tables and databases are
     /// omitted, collapsing any create/drop history into the current state.
@@ -63,22 +65,36 @@ pub enum CatalogError {
     #[display("table with ID {} was not found", _0)]
     TableNotFound(#[error(not(source))] TableId),
     #[from(skip)]
-    #[display("table with name '{}' already exists", _0)]
+    #[display("table with name '{}' already exists inside of this scope", _0)]
     TableAlreadyExists(#[error(not(source))] TempestStr<'static>),
+
+    #[from(skip)]
+    #[display("type with ID {} was not found", _0)]
+    TypeNotFound(#[error(not(source))] TypeId),
+    #[from(skip)]
+    #[display("type with name '{}' already exists inside of this scope", _0)]
+    TypeAlreadyExists(#[error(not(source))] TempestStr<'static>),
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct CatalogState {
-    /// Contains the definitions of all tables, accessible through their unique, stable ID.
-    pub(crate) tables: HashMap<TableId, TableSchema>,
-    /// Contains the definitions of all databases, accessible through their unique, stable ID.
-    pub(crate) databases: HashMap<DatabaseId, DatabaseSchema>,
     /// Monotonically increasing generator for the table IDs.
     /// Incremented automatically inside of [`Self::apply()].
     next_table_id: TableId,
+    /// Contains the definitions of all tables, accessible through their unique, stable ID.
+    pub(crate) tables: HashMap<TableId, TableSchema>,
+
     /// Monotonically increasing generator for the database IDs.
     /// Incremented automatically inside of [`Self::apply()].
     next_database_id: DatabaseId,
+    /// Contains the definitions of all databases, accessible through their unique, stable ID.
+    pub(crate) databases: HashMap<DatabaseId, DatabaseSchema>,
+
+    /// Monotonically increasing generator for the type IDs.
+    /// Incremented automatically inside of [`Self::apply()].
+    next_type_id: TypeId,
+    /// Contains the definitions of all types, accessible through their unique, stable ID.
+    pub(crate) types: HashMap<TypeId, TypeSchema>,
 }
 
 impl CatalogState {
@@ -111,11 +127,9 @@ impl CatalogState {
         let id = self.next_table_id;
         trace!(?id, "assigned id to create table edit");
 
-        if db
-            .tables
-            .iter()
-            .any(|id| self.tables[id].name == schema.name)
-        {
+        if db.tables.iter().any(|id| {
+            self.tables[id].database_id == schema.database_id && self.tables[id].name == schema.name
+        }) {
             return Err(CatalogError::TableAlreadyExists(schema.name));
         }
 
@@ -123,6 +137,21 @@ impl CatalogState {
             id,
             CatalogEdit::V1(CatalogEditV1::CreateTable((id, schema))),
         ))
+    }
+
+    fn create_type_edit(&self, schema: TypeSchema) -> Result<(TypeId, CatalogEdit), CatalogError> {
+        if self
+            .types
+            .values()
+            .any(|db| db.database_id == schema.database_id && db.name == schema.name)
+        {
+            return Err(CatalogError::TypeAlreadyExists(schema.name));
+        }
+
+        let id = self.next_type_id;
+        trace!(?id, "assigned id to create type edit");
+
+        Ok((id, CatalogEdit::V1(CatalogEditV1::CreateType((id, schema)))))
     }
 }
 
@@ -150,6 +179,12 @@ impl Replayable for CatalogState {
                         .tables
                         .insert(id);
                     self.tables.insert(id, schema);
+                }
+                CatalogEditV1::CreateType((id, schema)) => {
+                    debug!(?id, ?schema, "applying create type edit");
+                    assert!(!self.types.contains_key(&id));
+                    self.next_type_id = TypeId(*id + 1).max(self.next_type_id);
+                    self.types.insert(id, schema);
                 }
                 CatalogEditV1::Snapshot(edits) => {
                     debug!(count = edits.len(), "applying snapshot edits");

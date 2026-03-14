@@ -2,16 +2,9 @@ use std::ops::Range;
 
 use crate::{
     Parser, ParserError, ParserErrorKind,
-    ast::{Ident, PrimaryKey, TyPath},
+    ast::{Path, PrimaryKey},
     lexer::Token,
 };
-
-#[derive(Debug)]
-pub struct TablePath<'a> {
-    pub span: Range<usize>,
-    pub database: Ident<'a>,
-    pub table: Ident<'a>,
-}
 
 #[derive(Debug)]
 pub struct TableDeclBody<'a> {
@@ -22,23 +15,12 @@ pub struct TableDeclBody<'a> {
 #[derive(Debug)]
 pub struct CreateTableStmt<'a> {
     pub span: Range<usize>,
-    pub path: TablePath<'a>,
-    pub ty: TyPath<'a>,
+    pub path: Path<'a>,
+    pub ty: Path<'a>,
     pub body: TableDeclBody<'a>,
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_table_path(&mut self) -> Result<TablePath<'a>, ParserError> {
-        let database = self.parse_ident()?;
-        self.consume(&[Token::Dot])?;
-        let table = self.parse_ident()?;
-        Ok(TablePath {
-            span: database.span.start..table.span.end,
-            database,
-            table,
-        })
-    }
-
     pub(crate) fn parse_table_decl_body(&mut self) -> Result<TableDeclBody<'a>, ParserError> {
         let body_span_start = self.consume(&[Token::LBrace])?.span.start;
         let mut primary_key = None;
@@ -97,9 +79,9 @@ impl<'a> Parser<'a> {
     /// Assumes that `create` has already been parsed and the span is set.
     pub(crate) fn parse_create_table_stmt(&mut self) -> Result<CreateTableStmt<'a>, ParserError> {
         self.consume(&[Token::Table])?;
-        let path = self.parse_table_path()?;
+        let path = self.parse_path()?;
         let _colon = self.consume(&[Token::Colon])?;
-        let ty = self.parse_ty_path()?;
+        let ty = self.parse_path()?;
 
         // -- parse table body --
         let body = self.parse_table_decl_body()?;

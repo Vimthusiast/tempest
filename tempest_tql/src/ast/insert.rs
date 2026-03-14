@@ -2,7 +2,7 @@ use std::{borrow::Cow, ops::Range};
 
 use crate::{
     Parser, ParserError, ParserErrorKind,
-    ast::{Expr, Ident, TablePath},
+    ast::{Expr, Ident, Path},
     lexer::Token,
 };
 
@@ -22,7 +22,7 @@ pub struct InsertValueList<'a> {
 #[derive(Debug)]
 pub struct InsertIntoStmt<'a> {
     pub span: Range<usize>,
-    pub table: TablePath<'a>,
+    pub table: Path<'a>,
     pub values: InsertValueList<'a>,
 }
 
@@ -82,7 +82,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_insert_stmt(&mut self) -> Result<InsertIntoStmt<'a>, ParserError> {
         self.current_span.start = self.consume(&[Token::Insert])?.span.start;
         self.consume(&[Token::Into])?;
-        let table = self.parse_table_path()?;
+        let table = self.parse_path()?;
         let values = self.parse_insert_value_list()?;
         self.consume(&[Token::Semicolon])?;
         Ok(InsertIntoStmt {

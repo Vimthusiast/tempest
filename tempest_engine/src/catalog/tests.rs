@@ -1,7 +1,7 @@
 use tempest_core::test_utils::setup_tracing;
 
 use super::*;
-use crate::catalog::schema::{DatabaseSchema, TableSchema};
+use crate::catalog::schema::{DatabaseSchema, TableSchema, TypeId};
 
 fn make_db(name: &'static str) -> DatabaseSchema {
     DatabaseSchema {
@@ -14,7 +14,7 @@ fn make_table(database_id: DatabaseId, name: &'static str) -> TableSchema {
     TableSchema {
         database_id,
         name: name.into(),
-        columns: vec![],
+        type_id: TypeId(0),
         primary_key: vec![],
     }
 }
@@ -65,7 +65,7 @@ fn create_table_rejects_unknown_database() {
 }
 
 #[test]
-fn create_table_rejects_duplicate_name_within_database() {
+fn create_table_rejects_duplicate_name_within_same_but_not_different_database() {
     setup_tracing();
 
     let mut state = CatalogState::initial();
@@ -79,6 +79,14 @@ fn create_table_rejects_duplicate_name_within_database() {
         state.create_table_edit(make_table(db_id, "users")),
         Err(CatalogError::TableAlreadyExists(_))
     ));
+
+    let (other_id, edit) = state.create_database_edit(make_db("otherdb")).unwrap();
+    state.apply(edit);
+
+    let (_, edit) = state
+        .create_table_edit(make_table(other_id, "users"))
+        .unwrap();
+    state.apply(edit);
 
     debug!("final state: {:#?}", state);
 }

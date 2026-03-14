@@ -3,7 +3,7 @@ use derive_more::{Display, Error, From};
 use tempest_core::encoding::{LexicalDecodeError, RawDecodeError};
 
 use crate::{
-    base::KeySpace, catalog::schema::TableSchema, ctrl::hlc::HlcTimestamp, types::TempestValue,
+    base::KeySpace, ctrl::hlc::HlcTimestamp, row::resolved::ResolvedTable, types::TempestValue,
 };
 
 #[derive(Debug, Display, From, Error)]
@@ -17,12 +17,18 @@ pub enum RowDecodeError {
 
 #[derive(Debug)]
 pub(crate) struct RowDecoder<'a> {
-    schema: &'a TableSchema,
+    table: &'a ResolvedTable<'a>,
+    pk_indices: Vec<usize>,
 }
 
 impl<'a> RowDecoder<'a> {
-    pub(crate) fn new(schema: &'a TableSchema) -> Self {
-        Self { schema }
+    pub(crate) fn new(table: &'a ResolvedTable<'a>) -> Self {
+        let pk_indices = table
+            .primary_key
+            .iter()
+            .map(|fid| table.fields.keys().position(|k| k == fid).unwrap())
+            .collect();
+        Self { table, pk_indices }
     }
 
     /// Decodes the PK columns and HLC from a key buffer.
@@ -42,9 +48,9 @@ impl<'a> RowDecoder<'a> {
         buf.advance(4);
 
         // -- decode pk columns in schema order --
-        let mut pk_values = Vec::with_capacity(self.schema.columns.len());
-        for &idx in &self.schema.primary_key {
-            let ty = self.schema.columns[idx].ty;
+        let mut pk_values = Vec::with_capacity(self.table.primary_key.len());
+        for idx in self.table.primary_key {
+            let ty = self.table.fields[idx].ty;
             let val = TempestValue::decode_lexical(buf, ty)?;
             pk_values.push(val);
         }
@@ -60,29 +66,13 @@ impl<'a> RowDecoder<'a> {
         &self,
         buf: &mut Bytes,
     ) -> Result<Vec<TempestValue<'static>>, RowDecodeError> {
-        // -- get all non-pk columns --
-        let val_cols: Vec<_> = self
-            .schema
-            .columns
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, val)| {
-                if !self.schema.primary_key.contains(&idx) {
-                    Some(val)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let mut values = Vec::with_capacity(val_cols.len());
-        for (idx, col) in self.schema.columns.iter().enumerate() {
-            if !self.schema.primary_key.contains(&idx) {
-                let val = TempestValue::decode(buf, col.ty)?;
+        let mut values = Vec::new();
+        for (fid, def) in self.table.fields {
+            if !self.table.primary_key.contains(fid) {
+                let val = TempestValue::decode(buf, def.ty)?;
                 values.push(val);
             }
         }
-
         Ok(values)
     }
 
@@ -97,11 +87,11 @@ impl<'a> RowDecoder<'a> {
         let val_vals = self.decode_value(value_buf)?;
 
         // -- merge pk and non-pk back into schema order --
-        let mut row = Vec::with_capacity(self.schema.columns.len());
+        let mut row = Vec::with_capacity(self.table.fields.len());
         let mut pk_iter = pk_vals.into_iter();
         let mut val_iter = val_vals.into_iter();
-        for idx in 0..self.schema.columns.len() {
-            if self.schema.primary_key.contains(&idx) {
+        for idx in 0..self.table.fields.len() {
+            if self.pk_indices.contains(&idx) {
                 row.push(pk_iter.next().unwrap());
             } else {
                 row.push(val_iter.next().unwrap());

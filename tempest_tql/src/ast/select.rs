@@ -2,7 +2,7 @@ use std::{borrow::Cow, ops::Range};
 
 use crate::{
     Parser, ParserError, ParserErrorKind,
-    ast::{Ident, TablePath},
+    ast::{Ident, Path},
     lexer::Token,
 };
 
@@ -22,7 +22,7 @@ pub struct Projection<'a> {
 pub struct SelectFromStmt<'a> {
     pub span: Range<usize>,
     pub projection: Projection<'a>,
-    pub table: TablePath<'a>,
+    pub table: Path<'a>,
     // TODO: selection - filter out columns, based on a predicate expression
     // selection: Selection<'a>
 }
@@ -90,7 +90,7 @@ impl<'a> Parser<'a> {
         self.current_span.start = self.consume(&[Token::Select])?.span.start;
         let projection = self.parse_projection()?;
         self.consume(&[Token::From])?;
-        let table = self.parse_table_path()?;
+        let table = self.parse_path()?;
         // ...selection/filtering goes here...
         self.consume(&[Token::Semicolon])?;
         Ok(SelectFromStmt {
