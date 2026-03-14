@@ -27,4 +27,7 @@ impl Default for CatalogConfig {
     }
 }
 
-pub struct EngineConfig {}
+#[derive(Default, Clone)]
+pub struct EngineConfig {
+    pub catalog: CatalogConfig
+}

@@ -28,7 +28,7 @@ impl Comparer for EngineComparer {
     fn format(key: &[u8]) -> String {
         let (prefix, suffix) = Self::split_up(key);
         let hlc = HlcTimestamp::from_u64(u64::from_be_bytes(suffix.try_into().unwrap()));
-        format!("{:?}@{:?}", PrettyBytes(prefix), hlc)
+        format!("{:?}@{}", PrettyBytes(prefix), hlc)
     }
 }
 

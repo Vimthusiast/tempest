@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use derive_more::{Deref, Display};
 use serde::{Deserialize, Serialize};
 use tempest_core::tempest_str::TempestStr;
 
@@ -28,7 +29,7 @@ pub(crate) struct ColumnDef {
     Serialize,
     Deserialize,
 )]
-pub(crate) struct TableId(pub u32);
+pub struct TableId(pub u32);
 
 #[derive(
     Debug,
@@ -45,7 +46,7 @@ pub(crate) struct TableId(pub u32);
     Serialize,
     Deserialize,
 )]
-pub(crate) struct DatabaseId(pub u32);
+pub struct DatabaseId(pub u32);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TableSchema {
@@ -66,4 +67,13 @@ pub(crate) struct DatabaseSchema {
     pub name: TempestStr<'static>,
     /// The tables this database contains.
     pub tables: HashSet<TableId>,
+}
+
+impl DatabaseSchema {
+    pub(crate) fn new(name: TempestStr<'static>) -> Self {
+        Self {
+            name,
+            tables: HashSet::new(),
+        }
+    }
 }

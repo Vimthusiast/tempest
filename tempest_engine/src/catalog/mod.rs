@@ -1,5 +1,6 @@
 use std::{collections::HashMap, ops::Deref, path::PathBuf};
 
+use derive_more::{Display, Error, From};
 use serde::{Deserialize, Serialize};
 use tempest_core::{
     fio::FioFS,
@@ -40,14 +41,14 @@ pub(crate) enum CatalogEditV1 {
 /// without breaking existing journals - old `V1` edits remain valid even
 /// as new variants are added.
 #[repr(u16)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(derive_more::Debug, Serialize, Deserialize)]
 pub(crate) enum CatalogEdit {
     #[debug("{:?}", _0)]
     V1(CatalogEditV1) = 1,
 }
 
 #[derive(Debug, Display, Error, From)]
-pub(crate) enum CatalogError {
+pub enum CatalogError {
     #[display("journal error: {}", _0)]
     JournalError(JournalError),
 
@@ -69,9 +70,9 @@ pub(crate) enum CatalogError {
 #[derive(Debug, Default)]
 pub(crate) struct CatalogState {
     /// Contains the definitions of all tables, accessible through their unique, stable ID.
-    tables: HashMap<TableId, TableSchema>,
+    pub(crate) tables: HashMap<TableId, TableSchema>,
     /// Contains the definitions of all databases, accessible through their unique, stable ID.
-    databases: HashMap<DatabaseId, DatabaseSchema>,
+    pub(crate) databases: HashMap<DatabaseId, DatabaseSchema>,
     /// Monotonically increasing generator for the table IDs.
     /// Incremented automatically inside of [`Self::apply()].
     next_table_id: TableId,

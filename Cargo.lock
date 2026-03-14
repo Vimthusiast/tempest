@@ -616,10 +616,13 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "derive_more",
+ "itertools",
  "serde",
  "strum",
  "tempest_core",
  "tempest_kv",
+ "tempest_tql",
+ "tokio",
  "tracing",
 ]
 
