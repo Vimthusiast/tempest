@@ -35,9 +35,6 @@ impl<'a> RowEncoder<'a> {
         // -- encode table row key prefix --
         key_buf.put_u8(KeySpace::TableRow as u8);
 
-        // -- encode database id --
-        key_buf.put_slice(&self.schema.database_id.to_be_bytes());
-
         // -- encode table id --
         key_buf.put_slice(&self.table_id.to_be_bytes());
 

@@ -36,9 +36,9 @@ impl<'a> RowDecoder<'a> {
             return Err(RowDecodeError::InvalidKeySpace(ks));
         };
 
-        // -- skip database id and table id (already know them from context) --
+        // -- skip table id (already know it from context) --
         // TODO: should we verify?? -> not our concern
-        buf.advance(4 + 4);
+        buf.advance(4);
 
         // -- decode pk columns in schema order --
         let mut pk_values = Vec::with_capacity(self.schema.columns.len());
