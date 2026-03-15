@@ -18,7 +18,6 @@ impl<'a> Ident<'a> {
 }
 
 impl<'a> Parser<'a> {
-    #[instrument(skip_all, level = "debug")]
     pub(crate) fn parse_ident(&mut self) -> Result<Ident<'a>, ParseError> {
         let tok = self.lexer.next();
         match &tok.token {

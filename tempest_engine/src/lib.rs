@@ -5,7 +5,6 @@ use derive_more::{Display, Error, From};
 use itertools::Itertools;
 use tempest_core::fio::FioFS;
 use tempest_kv::{
-    Storage,
     base::StorageError,
     batch::WriteBatch,
     worker::{StorageHandle, StorageWorker},
@@ -13,7 +12,7 @@ use tempest_kv::{
 use tempest_tql::{ParseError, parse};
 
 use crate::{
-    base::EngineComparer,
+    base::{EngineComparer, KeySpace},
     catalog::{Catalog, CatalogError},
     config::EngineConfig,
     ctrl::hlc::HlcGenerator,
@@ -21,7 +20,12 @@ use crate::{
         QueryResult,
         plan::{PlanError, PlanNode, Planner},
     },
-    row::{encoder::RowEncoder, resolved::ResolvedTable},
+    row::{
+        decoder::{RowDecodeError, RowDecoder},
+        encoder::RowEncoder,
+        resolved::ResolvedTable,
+    },
+    types::TempestValue,
 };
 
 #[macro_use]
@@ -55,6 +59,9 @@ pub enum EngineError {
 
     #[display("storage error: {}", _0)]
     StorageError(StorageError),
+
+    #[display("row decode error: {}", _0)]
+    RowDecodeError(RowDecodeError),
 }
 
 pub struct Engine<F: FioFS> {
@@ -140,6 +147,65 @@ impl<F: FioFS> Engine<F> {
                 // TODO: number of lines modified
                 Ok(QueryResult::Empty)
             }
+            PlanNode::Select { table_id, columns } => {
+                let table_schema = self
+                    .catalog
+                    .tables
+                    .get(&table_id)
+                    .expect("table in plan not found in catalog");
+                let type_schema = self
+                    .catalog
+                    .types
+                    .get(&table_schema.type_id)
+                    .expect("type in plan not found in catalog");
+
+                let resolved = ResolvedTable {
+                    id: table_id,
+                    fields: &type_schema.fields,
+                    primary_key: &table_schema.primary_key,
+                };
+                let decoder = RowDecoder::new(&resolved);
+
+                let col_indices: Vec<_> = columns
+                    .iter()
+                    .map(|fid| {
+                        resolved
+                            .fields
+                            .keys()
+                            .position(|k| k == fid)
+                            .expect("field id of resolved column should exist")
+                    })
+                    .collect();
+
+                let col_names: Vec<_> = columns
+                    .iter()
+                    .map(|fid| resolved.fields[fid].name.clone())
+                    .collect();
+
+                let mut rx = self.storage.scan().await?;
+                let mut rows = Vec::new();
+                while let Some(result) = rx.recv().await {
+                    let (mut key, mut value) = result?;
+                    // filter to only this table's rows
+                    // TODO: implement filtering and seeking on internal iterators
+                    if key.len() < 5 || key[0] != KeySpace::TableRow as u8 {
+                        continue;
+                    }
+                    let row_table_id = u32::from_be_bytes(key[1..5].try_into().unwrap());
+                    if row_table_id != *table_id {
+                        continue;
+                    }
+                    let decoded = decoder.decode_row(&mut key, &mut value)?;
+                    // TODO: get around this clone by removing sparsely from the decoded values
+                    let projected = col_indices.iter().map(|&i| decoded[i].clone()).collect();
+                    rows.push(projected);
+                }
+
+                Ok(QueryResult::Rows {
+                    columns: col_names,
+                    rows,
+                })
+            }
         }
     }
 
@@ -176,6 +242,8 @@ impl<F: FioFS> Engine<F> {
 mod tests {
     use tempest_core::fio::VirtualFileSystem;
 
+    use crate::types::TempestValue;
+
     use super::*;
 
     #[tokio::test]
@@ -184,6 +252,7 @@ mod tests {
         let root = PathBuf::from("/tempest");
         let config = EngineConfig::default();
         let mut engine = Engine::open(fs, root, config).await.unwrap();
+
         engine.execute("create database main;").await.unwrap();
         engine
             .execute("create type main.User { id: Int64, username: String };")
@@ -194,9 +263,29 @@ mod tests {
             .await
             .unwrap();
         engine
-            .execute("insert into main.users { id: 0, username: \"John\" };")
+            .execute("insert into main.users { id: 1, username: \"John\" };")
             .await
             .unwrap();
+        let full_results = engine.execute("select * from main.users;").await.unwrap();
+        let QueryResult::Rows { columns, rows } = &full_results[0] else {
+            panic!("expected rows, got {:?}", &full_results[0])
+        };
+        assert_eq!(columns[0], "id".into());
+        assert_eq!(columns[1], "username".into());
+
+        assert_eq!(rows[0][0], TempestValue::Int64(1));
+        assert_eq!(rows[0][1], TempestValue::String("John".into()));
+
+        let projected_results = engine
+            .execute("select username from main.users;")
+            .await
+            .unwrap();
+        let QueryResult::Rows { columns, rows } = &projected_results[0] else {
+            panic!("expected rows, got {:?}", &full_results[0])
+        };
+        assert_eq!(columns[0], "username".into());
+
+        assert_eq!(rows[0][0], TempestValue::String("John".into()));
 
         engine.shutdown().await.unwrap();
     }

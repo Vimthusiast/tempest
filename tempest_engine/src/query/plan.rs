@@ -5,7 +5,8 @@ use itertools::Itertools;
 use strum::IntoDiscriminant;
 use tempest_core::{fio::FioFS, tempest_str::TempestStr};
 use tempest_tql::ast::{
-    CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, Expr, InsertIntoStmt, Stmt,
+    CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, Expr, InsertIntoStmt, ProjectionKind,
+    SelectFromStmt, Stmt,
 };
 
 use crate::{
@@ -51,6 +52,10 @@ pub(crate) enum PlanNode {
     Insert {
         table_id: TableId,
         row: Vec<TempestValue<'static>>,
+    },
+    Select {
+        table_id: TableId,
+        columns: Vec<FieldId>,
     },
 }
 
@@ -169,6 +174,30 @@ impl<'a, F: FioFS> Planner<'a, F> {
         })
     }
 
+    pub(crate) fn plan_select_from(&self, stmt: SelectFromStmt) -> Result<PlanNode, PlanError> {
+        let table = resolve_table(&stmt.table, self.catalog)?;
+
+        let columns = match stmt.projection.kind {
+            ProjectionKind::All => table.fields.keys().copied().collect_vec(),
+            ProjectionKind::Columns(idents) => idents
+                .iter()
+                .map(|ident| {
+                    table
+                        .fields
+                        .iter()
+                        .find(|(_, def)| def.name == ident.name)
+                        .map(|(fid, _)| *fid)
+                        .ok_or_else(|| PlanError::FieldNotFound(ident.name.clone().into_owned()))
+                })
+                .collect::<Result<Vec<FieldId>, PlanError>>()?,
+        };
+
+        Ok(PlanNode::Select {
+            table_id: table.id,
+            columns,
+        })
+    }
+
     // TODO: how to do planning with multiple statements in a row, like in transactions?
     pub(crate) fn plan(&self, stmt: Stmt<'_>) -> Result<PlanNode, PlanError> {
         match stmt {
@@ -176,7 +205,7 @@ impl<'a, F: FioFS> Planner<'a, F> {
             Stmt::CreateTy(stmt) => self.plan_create_type(stmt),
             Stmt::CreateTable(stmt) => self.plan_create_table(stmt),
             Stmt::InsertInto(stmt) => self.plan_insert_into(stmt),
-            _ => todo!("plan statement {:?}", stmt),
+            Stmt::SelectFrom(stmt) => self.plan_select_from(stmt),
         }
     }
 }

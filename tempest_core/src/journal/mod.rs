@@ -14,7 +14,7 @@ use tokio_uring::buf::BoundedBuf;
 use crate::{
     bincode_options,
     fio::{FioFS, FioFile},
-    utils::{ByteSize, HexU64, PrettyBytes},
+    utils::{ByteSize, HexU64},
 };
 
 #[cfg(test)]
@@ -388,7 +388,9 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
 
         // read edit prefix
         scratch.resize(EDIT_PREFIX_SIZE, 0);
-        let (res, sliced_scratch) = file.read_exact_at(scratch.slice(..EDIT_PREFIX_SIZE), current_filepos).await;
+        let (res, sliced_scratch) = file
+            .read_exact_at(scratch.slice(..EDIT_PREFIX_SIZE), current_filepos)
+            .await;
         let mut scratch = sliced_scratch.into_inner();
         if let Err(e) = res {
             return (Err(e.into()), scratch);
@@ -399,7 +401,9 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
 
         // read edit body
         scratch.resize(prefix.len() as usize, 0);
-        let (res, sliced_scratch) = file.read_exact_at(scratch.slice(..prefix.len() as usize), current_filepos).await;
+        let (res, sliced_scratch) = file
+            .read_exact_at(scratch.slice(..prefix.len() as usize), current_filepos)
+            .await;
         let scratch = sliced_scratch.into_inner();
         if let Err(e) = res {
             return (Err(e.into()), scratch);

@@ -1,5 +1,6 @@
 use std::{path::PathBuf, thread};
 
+use bytes::Bytes;
 use tempest_core::fio::FioFS;
 use tokio::sync::{mpsc, oneshot};
 use tracing::Level;
@@ -9,6 +10,7 @@ use crate::{
     base::{Comparer, StorageError, StorageResult},
     batch::WriteBatch,
     config::StorageConfig,
+    iterator::StorageIterator,
 };
 
 #[derive(Debug)]
@@ -19,6 +21,7 @@ pub enum StorageCommand {
     },
     Scan {
         // TODO: implement scan via channel + snapshotting
+        respond_to: oneshot::Sender<StorageResult<mpsc::Receiver<StorageResult<(Bytes, Bytes)>>>>,
     },
     Shutdown {
         respond_to: oneshot::Sender<StorageResult<()>>,
@@ -37,6 +40,14 @@ impl StorageHandle {
                 batch,
                 respond_to: tx,
             })
+            .await?;
+        rx.await?
+    }
+
+    pub async fn scan(&self) -> StorageResult<mpsc::Receiver<StorageResult<(Bytes, Bytes)>>> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(StorageCommand::Scan { respond_to: tx })
             .await?;
         rx.await?
     }
@@ -150,7 +161,30 @@ impl<F: FioFS, C: Comparer> StorageWorker<F, C> {
                 }
                 Ok(CommandControlFlow::Continue)
             }
-            StorageCommand::Scan {} => todo!(),
+            StorageCommand::Scan { respond_to } => {
+                let (tx, rx) = mpsc::channel(64);
+                let _ = respond_to.send(Ok(rx));
+
+                let mut iter = self.storage.scan().await?;
+                loop {
+                    match iter.next().await {
+                        Ok(Some(())) => {
+                            let key = iter.key().unwrap().key().clone();
+                            let value = iter.value().unwrap().clone();
+                            if tx.send(Ok((key, value))).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            break;
+                        }
+                    }
+                }
+
+                Ok(CommandControlFlow::Continue)
+            }
             StorageCommand::Shutdown { respond_to } => {
                 Ok(CommandControlFlow::Shutdown { respond_to })
             }

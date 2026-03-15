@@ -1,4 +1,4 @@
-use std::{borrow::Cow, ops::Range};
+use std::ops::Range;
 
 use crate::{
     Parser, ParseError, ParserErrorKind,
