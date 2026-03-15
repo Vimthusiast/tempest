@@ -175,7 +175,7 @@ mod tests {
         let Stmt::CreateDatabase(CreateDatabaseStmt { name, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(name.name, "mydb");
+        assert_eq!(name.name, "mydb".into());
         assert_eq!(statements.len(), 1);
     }
 
@@ -190,10 +190,10 @@ mod tests {
         let Stmt::CreateTable(CreateTableStmt { path, ty, body, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(path.database.as_ref().unwrap().name, "mydb");
-        assert_eq!(path.name.name, "users");
-        assert_eq!(ty.name.name, "User");
-        assert_eq!(body.primary_key.columns[0].name, "id");
+        assert_eq!(path.database.as_ref().unwrap().name, "mydb".into());
+        assert_eq!(path.name.name, "users".into());
+        assert_eq!(ty.name.name, "User".into());
+        assert_eq!(body.primary_key.columns[0].name, "id".into());
         assert_eq!(body.primary_key.columns.len(), 1);
         assert_eq!(statements.len(), 1);
     }
@@ -212,11 +212,11 @@ mod tests {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
 
-        assert_eq!(path.name.name, "User");
-        assert_eq!(body.fields[0].name.name, "id");
-        assert_eq!(body.fields[0].ty.name.name, "Int64");
-        assert_eq!(body.fields[1].name.name, "username");
-        assert_eq!(body.fields[1].ty.name.name, "String");
+        assert_eq!(path.name.name, "User".into());
+        assert_eq!(body.fields[0].name.name, "id".into());
+        assert_eq!(body.fields[0].ty.name.name, "Int64".into());
+        assert_eq!(body.fields[1].name.name, "username".into());
+        assert_eq!(body.fields[1].ty.name.name, "String".into());
         assert_eq!(body.fields.len(), 2);
         assert_eq!(statements.len(), 1);
     }
@@ -232,8 +232,8 @@ mod tests {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
 
-        assert_eq!(path.database.as_ref().unwrap().name, "main");
-        assert_eq!(path.name.name, "User");
+        assert_eq!(path.database.as_ref().unwrap().name, "main".into());
+        assert_eq!(path.name.name, "User".into());
     }
 
     #[test]

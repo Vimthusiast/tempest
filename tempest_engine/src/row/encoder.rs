@@ -1,4 +1,4 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::{
     base::KeySpace, ctrl::hlc::HlcTimestamp, row::resolved::ResolvedTable, types::TempestValue,
@@ -64,6 +64,21 @@ impl<'a> RowEncoder<'a> {
         for col in val_cols {
             col.encode(value_buf);
         }
+    }
+
+    pub(crate) fn table_prefix(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.put_u8(KeySpace::TableRow as u8);
+        buf.put_slice(&self.table.id.to_be_bytes());
+        buf.freeze()
+    }
+
+    pub(crate) fn search_prefix(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.put_u8(KeySpace::TableRow as u8);
+        buf.put_slice(&self.table.id.to_be_bytes());
+        buf.put_u64(*HlcTimestamp::MAX);
+        buf.freeze()
     }
 
     /// Encodes a full row into `key_buf` and `value_buf`.

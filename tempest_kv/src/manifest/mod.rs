@@ -1,9 +1,8 @@
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tempest_core::{
     fio::FioFS,

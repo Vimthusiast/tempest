@@ -182,19 +182,21 @@ impl<F: FioFS> Engine<F> {
                     .map(|fid| resolved.fields[fid].name.clone())
                     .collect();
 
-                let mut rx = self.storage.scan().await?;
+                let encoder = RowEncoder::new(&resolved);
+                let table_prefix = encoder.table_prefix();
+                let seek_prefix = encoder.search_prefix();
+
+                // start at the right prefix, to skip other tables
+                let mut rx = self.storage.scan(seek_prefix).await?;
                 let mut rows = Vec::new();
                 while let Some(result) = rx.recv().await {
                     let (mut key, mut value) = result?;
-                    // filter to only this table's rows
-                    // TODO: implement filtering and seeking on internal iterators
-                    if key.len() < 5 || key[0] != KeySpace::TableRow as u8 {
-                        continue;
+
+                    // stop once exiting seek prefix
+                    if !key.starts_with(&table_prefix) {
+                        break;
                     }
-                    let row_table_id = u32::from_be_bytes(key[1..5].try_into().unwrap());
-                    if row_table_id != *table_id {
-                        continue;
-                    }
+
                     let decoded = decoder.decode_row(&mut key, &mut value)?;
                     // TODO: get around this clone by removing sparsely from the decoded values
                     let projected = col_indices.iter().map(|&i| decoded[i].clone()).collect();
@@ -240,7 +242,7 @@ impl<F: FioFS> Engine<F> {
 
 #[cfg(test)]
 mod tests {
-    use tempest_core::fio::VirtualFileSystem;
+    use tempest_core::{fio::VirtualFileSystem, test_utils::setup_tracing};
 
     use crate::types::TempestValue;
 
@@ -248,6 +250,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine() {
+        setup_tracing();
+
         let fs = VirtualFileSystem::new();
         let root = PathBuf::from("/tempest");
         let config = EngineConfig::default();

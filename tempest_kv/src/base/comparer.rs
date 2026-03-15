@@ -4,6 +4,7 @@ use std::cmp;
 
 use tempest_core::utils::PrettyBytes;
 
+/// Abstraction over compare implementations from the user side of this storage.
 pub trait Comparer: Default + Clone + 'static {
     /// Returns the index where the version suffix starts.
     /// If there is no suffix, returns the length of the slice.

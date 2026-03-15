@@ -4,7 +4,10 @@ use crate::{
     base::{Comparer, DefaultComparer, InternalKey, KeyKind, KeyTrailer, SeqNum, StorageResult},
     batch::WriteBatch,
     config::StorageConfig,
-    iterator::{DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry, SyncIterator},
+    iterator::{
+        DeduplicatingIterator, MergingIterator, MergingIteratorHeapEntry, SnapshotIterator,
+        SyncIterator,
+    },
     manifest::{ManifestRequest, StorageManifest},
     memtable::MemTable,
     sst::{SST_DIR, get_sst_path, reader::SstReader},
@@ -217,7 +220,9 @@ impl<F: FioFS, C: Comparer> Storage<F, C> {
     #[instrument(skip_all, level = "debug")]
     pub(crate) async fn scan(
         &self,
-    ) -> StorageResult<DeduplicatingIterator<'_, MergingIterator<'_, C>, C>> {
+        snapshot: SeqNum,
+    ) -> StorageResult<DeduplicatingIterator<'_, SnapshotIterator<'_, MergingIterator<'_, C>, C>, C>>
+    {
         let mut sources = Vec::new();
 
         // -- pull from active memtable --
@@ -245,7 +250,10 @@ impl<F: FioFS, C: Comparer> Storage<F, C> {
             ));
         }
 
-        Ok(DeduplicatingIterator::new(MergingIterator::new(sources)))
+        Ok(DeduplicatingIterator::new(SnapshotIterator::new(
+            MergingIterator::new(sources),
+            snapshot,
+        )))
     }
 
     pub(crate) const fn highest_seqnum(&self) -> SeqNum {

@@ -21,6 +21,7 @@ pub enum StorageCommand {
     },
     Scan {
         // TODO: implement scan via channel + snapshotting
+        seek_prefix: Bytes,
         respond_to: oneshot::Sender<StorageResult<mpsc::Receiver<StorageResult<(Bytes, Bytes)>>>>,
     },
     Shutdown {
@@ -44,10 +45,16 @@ impl StorageHandle {
         rx.await?
     }
 
-    pub async fn scan(&self) -> StorageResult<mpsc::Receiver<StorageResult<(Bytes, Bytes)>>> {
+    pub async fn scan(
+        &self,
+        seek_prefix: Bytes,
+    ) -> StorageResult<mpsc::Receiver<StorageResult<(Bytes, Bytes)>>> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(StorageCommand::Scan { respond_to: tx })
+            .send(StorageCommand::Scan {
+                seek_prefix,
+                respond_to: tx,
+            })
             .await?;
         rx.await?
     }
@@ -161,25 +168,40 @@ impl<F: FioFS, C: Comparer> StorageWorker<F, C> {
                 }
                 Ok(CommandControlFlow::Continue)
             }
-            StorageCommand::Scan { respond_to } => {
+            StorageCommand::Scan {
+                seek_prefix,
+                respond_to,
+            } => {
                 let (tx, rx) = mpsc::channel(64);
                 let _ = respond_to.send(Ok(rx));
 
-                let mut iter = self.storage.scan().await?;
+                let snapshot = self.storage.highest_seqnum();
+                let mut iter = self.storage.scan(snapshot).await?;
+                iter.seek(&seek_prefix).await?;
+
+                // read the first entry directly after seek without advancing
                 loop {
-                    match iter.next().await {
-                        Ok(Some(())) => {
-                            let key = iter.key().unwrap().key().clone();
-                            let value = iter.value().unwrap().clone();
+                    match (iter.key(), iter.value()) {
+                        (Some(key), Some(value)) => {
+                            let key = key.key().clone();
+                            if !key.starts_with(&seek_prefix[..5]) {
+                                break;
+                            }
+                            let value = value.clone();
                             if tx.send(Ok((key, value))).await.is_err() {
                                 break;
                             }
+                            // now advance
+                            match iter.next().await {
+                                Ok(Some(())) => continue,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    let _ = tx.send(Err(e)).await;
+                                    break;
+                                }
+                            }
                         }
-                        Ok(None) => break,
-                        Err(e) => {
-                            let _ = tx.send(Err(e)).await;
-                            break;
-                        }
+                        _ => break,
                     }
                 }
 
