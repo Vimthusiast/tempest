@@ -3,9 +3,14 @@ name = "tempest_tql"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+testing = []
+
 [dependencies]
 derive_more = { workspace = true }
 itertools = { workspace = true }
 logos = { workspace = true }
 strum = { workspace = true }
 tracing = { workspace = true }
+
+tempest_core = { workspace = true }

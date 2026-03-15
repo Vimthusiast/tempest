@@ -1,4 +1,5 @@
 use tempest_core::journal::JournalConfig;
+use tempest_kv::config::StorageConfig;
 
 #[derive(Debug, Clone)]
 pub struct CatalogConfig {
@@ -27,4 +28,8 @@ impl Default for CatalogConfig {
     }
 }
 
-pub struct EngineConfig {}
+#[derive(Default, Clone)]
+pub struct EngineConfig {
+    pub catalog: CatalogConfig,
+    pub storage: StorageConfig,
+}

@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use derive_more::Display;
 use logos::Logos;
 use strum::IntoStaticStr;
+use tempest_core::tempest_str::TempestStr;
 
 #[derive(Debug, Display, Clone, PartialEq, Eq, Logos, IntoStaticStr)]
 #[logos(skip(r"[ \t\n\f]+"))]
@@ -117,13 +118,16 @@ pub enum Token<'a> {
     Lte,
 
     // -- literals --
-    #[strum(serialize = "IDENTIFIER")]
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| Cow::Borrowed(lex.slice()))]
-    Identifier(Cow<'a, str>),
-    #[strum(serialize = "INTEGER_LITERAL")]
+    #[strum(serialize = "identifier")]
+    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| {
+        TempestStr::from_borrowed(lex.slice())
+            .expect("identifier tokens are guranteed null-free by the lexer")
+    })]
+    Identifier(TempestStr<'a>),
+    #[strum(serialize = "integer literal")]
     #[regex(r"-?[0-9]+", |lex| Cow::Borrowed(lex.slice()))]
     IntegerLiteral(Cow<'a, str>),
-    #[strum(serialize = "STRING_LITERAL")]
+    #[strum(serialize = "string literal")]
     #[regex(r#""[^"]*""#, |lex| {
         let slice = lex.slice();
         // trim the leading and trailing quotes
@@ -174,7 +178,7 @@ impl<'a> Token<'a> {
             Self::Gte => Token::Gte,
             Self::Lte => Token::Lte,
 
-            Self::Identifier(ident) => Token::Identifier(Cow::Owned(ident.into_owned())),
+            Self::Identifier(ident) => Token::Identifier(ident.into_owned()),
             Self::IntegerLiteral(lit) => Token::IntegerLiteral(Cow::Owned(lit.into_owned())),
             Self::StringLiteral(lit) => Token::StringLiteral(Cow::Owned(lit.into_owned())),
 
@@ -184,5 +188,13 @@ impl<'a> Token<'a> {
 
     pub(crate) fn name(&self) -> &'static str {
         self.into()
+    }
+
+    pub(crate) const fn empty_ident() -> Token<'static> {
+        Token::Identifier(unsafe { TempestStr::from_borrowed_unchecked("") })
+    }
+
+    pub(crate) const fn empty_string() -> Token<'static> {
+        Token::StringLiteral(Cow::Borrowed(""))
     }
 }

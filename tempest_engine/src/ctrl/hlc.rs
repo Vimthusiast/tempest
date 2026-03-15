@@ -7,6 +7,8 @@
 // => We could try persisting the timestamp every so often to avoid going back in time, like with
 // the sequence numbers in the [`StorageManifest`] implementation (range allocations).
 
+use derive_more::{Deref, Display};
+
 /// # Hybrid Logical Clock Timestamp
 ///
 /// Tempest uses these to order data within different storages, using a custom [`Comparer`]
@@ -14,14 +16,16 @@
 ///
 /// [`Comparer`]: tempest_kv::base::comparer::Comparer
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deref)]
-#[debug("{}.{}", self.counter(), self.millis())]
+#[derive(Debug, Display, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deref)]
+#[display("{}.{}", self.millis(), self.counter())]
 pub struct HlcTimestamp(
     /// Packs the millis in the upper 48 bits and the counter in the lower 16 bits.
     u64,
 );
 
 impl HlcTimestamp {
+    pub const MAX: Self = Self(u64::MAX);
+
     #[inline]
     pub const fn new(millis: u64, counter: u16) -> Self {
         Self((millis << 16) | (counter as u64))

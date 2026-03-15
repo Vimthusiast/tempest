@@ -1,31 +1,33 @@
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::{
-    base::KeySpace,
-    catalog::schema::{TableId, TableSchema},
-    ctrl::hlc::HlcTimestamp,
-    types::TempestValue,
+    base::KeySpace, ctrl::hlc::HlcTimestamp, row::resolved::ResolvedTable, types::TempestValue,
 };
 
 #[derive(Debug)]
 pub(crate) struct RowEncoder<'a> {
-    table_id: TableId,
-    schema: &'a TableSchema,
+    table: &'a ResolvedTable<'a>,
+    pk_indices: Vec<usize>,
 }
 
 impl<'a> RowEncoder<'a> {
-    pub(crate) fn new(table_id: TableId, schema: &'a TableSchema) -> Self {
-        Self { table_id, schema }
+    pub(crate) fn new(table: &'a ResolvedTable<'a>) -> Self {
+        let pk_indices = table
+            .primary_key
+            .iter()
+            .map(|fid| table.fields.keys().position(|k| k == fid).unwrap())
+            .collect();
+        Self { table, pk_indices }
     }
 
     fn typecheck(&self, row: &[TempestValue<'_>]) {
-        assert_eq!(row.len(), self.schema.columns.len());
-        for (val, col) in row.iter().zip(self.schema.columns.iter()) {
+        assert_eq!(row.len(), self.table.fields.len());
+        for (val, def) in row.iter().zip(self.table.fields.values()) {
             assert!(
-                val.ty() == col.ty,
+                val.ty() == def.ty,
                 "invalid type for column '{}': expected {:?}, but got {:?}",
-                col.name,
-                col.ty,
+                def.name,
+                def.ty,
                 val.ty(),
             )
         }
@@ -35,21 +37,12 @@ impl<'a> RowEncoder<'a> {
         // -- encode table row key prefix --
         key_buf.put_u8(KeySpace::TableRow as u8);
 
-        // -- encode database id --
-        key_buf.put_slice(&self.schema.database_id.to_be_bytes());
-
         // -- encode table id --
-        key_buf.put_slice(&self.table_id.to_be_bytes());
+        key_buf.put_slice(&self.table.id.to_be_bytes());
 
         // -- encode primary key columns --
-        let pk_cols: Vec<_> = self
-            .schema
-            .primary_key
-            .iter()
-            .map(|&idx| &row[idx])
-            .collect();
-        for col in pk_cols {
-            col.encode_lexical(key_buf);
+        for &idx in &self.pk_indices {
+            row[idx].encode_lexical(key_buf);
         }
 
         // -- encode the hlc timestamp --
@@ -58,8 +51,9 @@ impl<'a> RowEncoder<'a> {
 
     fn encode_value(&self, row: &[TempestValue<'_>], value_buf: &mut BytesMut) {
         // -- get all non-pk columns --
+        // TODO: precompute and store this?
         let val_cols = row.iter().enumerate().filter_map(|(idx, val)| {
-            if !self.schema.primary_key.contains(&idx) {
+            if !self.pk_indices.contains(&idx) {
                 Some(val)
             } else {
                 None
@@ -72,9 +66,24 @@ impl<'a> RowEncoder<'a> {
         }
     }
 
+    pub(crate) fn table_prefix(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.put_u8(KeySpace::TableRow as u8);
+        buf.put_slice(&self.table.id.to_be_bytes());
+        buf.freeze()
+    }
+
+    pub(crate) fn search_prefix(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.put_u8(KeySpace::TableRow as u8);
+        buf.put_slice(&self.table.id.to_be_bytes());
+        buf.put_u64(*HlcTimestamp::MAX);
+        buf.freeze()
+    }
+
     /// Encodes a full row into `key_buf` and `value_buf`.
     /// `row` is the full row - the encoder picks out PK columns via `schema.primary_key`.
-    /// The row must be in order of the schema's column definitions.
+    /// The row must be in order of the schema's column definitions, ordered by field ID.
     ///
     /// # Panics
     ///

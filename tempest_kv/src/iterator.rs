@@ -9,15 +9,24 @@ use std::{
 
 use bytes::Bytes;
 
-use crate::base::{Comparer, InternalKey, StorageResult};
+use crate::base::{Comparer, InternalKey, SeqNum, StorageResult};
 
-pub trait StorageIterator<'a, C: Comparer> {
+pub trait StorageIterator<'i, C: Comparer> {
     /// Tries to poll the next key-value pair into this iterator.
     /// They can be accessed through the [`key`] and [`value`] methods.
     ///
-    /// [`key`]: StorageIterator::key()
-    /// [`value`]: StorageIterator::value()
+    /// [`key`]: StorageIterator::key
+    /// [`value`]: StorageIterator::value
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>>;
+
+    /// Tries to advance this iterator to the first key greater than or equal to `key`,
+    /// determined by [logical not physical ordering](Comparer).
+    /// After a successful poll, [`key`] and [`value`] will reflect the seeked-to entry,
+    /// or `None` if no such entry exists.
+    ///
+    /// [`key`]: StorageIterator::key
+    /// [`value`]: StorageIterator::value
+    fn poll_seek(&mut self, key: &[u8], cx: &mut task::Context<'_>) -> Poll<StorageResult<()>>;
 
     /// Returns the last key that was polled.
     fn key(&self) -> Option<&InternalKey<C>>;
@@ -25,7 +34,7 @@ pub trait StorageIterator<'a, C: Comparer> {
     fn value(&self) -> Option<&Bytes>;
 
     /// Returns a future that resolves on the next element.
-    fn next(&mut self) -> Next<'_, 'a, Self, C>
+    fn next(&mut self) -> Next<'_, 'i, Self, C>
     where
         Self: Sized,
     {
@@ -34,26 +43,67 @@ pub trait StorageIterator<'a, C: Comparer> {
             _marker: PhantomData,
         }
     }
+
+    /// Returns a future that advances this iterator to the first key greater than or
+    /// equal to `key`. Equivalent to calling [`poll_seek`] until it returns [`Poll::Ready`].
+    ///
+    /// [`poll_seek`]: StorageIterator::poll_seek
+    fn seek<'a>(&'a mut self, key: &'a [u8]) -> Seek<'a, 'i, Self, C>
+    where
+        Self: Sized,
+    {
+        Seek {
+            iter: self,
+            key,
+            _marker: PhantomData,
+        }
+    }
 }
 
-pub struct Next<'b, 'a, I, C>
+#[must_use = "futures do nothing unless awaited"]
+pub struct Next<'a, 'i, I, C>
 where
-    I: StorageIterator<'a, C>,
+    I: StorageIterator<'i, C>,
     C: Comparer,
 {
-    iter: &'b mut I,
-    _marker: PhantomData<&'a C>,
+    iter: &'a mut I,
+    _marker: PhantomData<&'i C>,
 }
 
-impl<'b, 'a, I, C> Future for Next<'b, 'a, I, C>
+impl<'a, 'i, I, C> Future for Next<'a, 'i, I, C>
 where
-    I: StorageIterator<'a, C>,
+    I: StorageIterator<'i, C>,
     C: Comparer,
 {
     type Output = StorageResult<Option<()>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.iter.poll_next(cx)
+    }
+}
+
+#[must_use = "futures do nothing unless awaited"]
+pub struct Seek<'a, 'i, I, C>
+where
+    I: StorageIterator<'i, C>,
+    C: Comparer,
+{
+    iter: &'a mut I,
+    key: &'a [u8],
+    _marker: PhantomData<&'i C>,
+}
+
+impl<'a, 'i, I, C> Future for Seek<'a, 'i, I, C>
+where
+    I: StorageIterator<'i, C>,
+    C: Comparer,
+{
+    type Output = StorageResult<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: we do not move out of self
+        let this = unsafe { self.get_unchecked_mut() };
+        this.iter.poll_seek(this.key, cx)
     }
 }
 
@@ -110,7 +160,7 @@ where
     }
 }
 
-impl<'a, C, I> StorageIterator<'a, C> for SyncIterator<C, I>
+impl<'i, C, I> StorageIterator<'i, C> for SyncIterator<C, I>
 where
     C: Comparer,
     I: Iterator<Item = (InternalKey<C>, Bytes)>,
@@ -126,6 +176,23 @@ where
         }
     }
 
+    fn poll_seek(&mut self, key: &[u8], _cx: &mut task::Context<'_>) -> Poll<StorageResult<()>> {
+        loop {
+            match self.inner.next() {
+                Some((k, v)) => {
+                    if C::compare_logical(k.key(), key).is_ge() {
+                        self.current = Some((k, v));
+                        return Poll::Ready(Ok(()));
+                    }
+                }
+                None => {
+                    self.current = None;
+                    return Poll::Ready(Ok(()));
+                }
+            }
+        }
+    }
+
     fn key(&self) -> Option<&InternalKey<C>> {
         self.current.as_ref().map(|(k, _v)| k)
     }
@@ -135,9 +202,9 @@ where
     }
 }
 
-pub struct MergingIteratorHeapEntry<'a, C: Comparer> {
+pub struct MergingIteratorHeapEntry<'i, C: Comparer> {
     /// The internal iterator implementation.
-    pub iter: Box<dyn StorageIterator<'a, C> + 'a>,
+    pub iter: Box<dyn StorageIterator<'i, C> + 'i>,
 
     /// Higher ID = newer source. The active memtable has the highest priority, so u64::MAX.
     /// The first immutable memtable gets `u64::MAX-1`, then `-2`, and so on.
@@ -145,8 +212,8 @@ pub struct MergingIteratorHeapEntry<'a, C: Comparer> {
     pub source_id: u64,
 }
 
-impl<'a, C: Comparer> MergingIteratorHeapEntry<'a, C> {
-    pub fn new<I: StorageIterator<'a, C> + 'a>(iter: I, source_id: u64) -> Self {
+impl<'i, C: Comparer> MergingIteratorHeapEntry<'i, C> {
+    pub fn new<I: StorageIterator<'i, C> + 'i>(iter: I, source_id: u64) -> Self {
         Self {
             iter: Box::new(iter),
             source_id,
@@ -154,15 +221,15 @@ impl<'a, C: Comparer> MergingIteratorHeapEntry<'a, C> {
     }
 }
 
-impl<'a, C: Comparer> PartialEq for MergingIteratorHeapEntry<'a, C> {
+impl<'i, C: Comparer> PartialEq for MergingIteratorHeapEntry<'i, C> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other).is_eq()
     }
 }
 
-impl<'a, C: Comparer> Eq for MergingIteratorHeapEntry<'a, C> {}
+impl<'i, C: Comparer> Eq for MergingIteratorHeapEntry<'i, C> {}
 
-impl<'a, C: Comparer> PartialOrd for MergingIteratorHeapEntry<'a, C> {
+impl<'i, C: Comparer> PartialOrd for MergingIteratorHeapEntry<'i, C> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -170,7 +237,7 @@ impl<'a, C: Comparer> PartialOrd for MergingIteratorHeapEntry<'a, C> {
 
 // NB: When implementing ordering of max-heap entries, greater values will bubble up,
 // therefore, when a is some and b is none, a > b.
-impl<'a, C: Comparer> Ord for MergingIteratorHeapEntry<'a, C> {
+impl<'i, C: Comparer> Ord for MergingIteratorHeapEntry<'i, C> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.iter.key(), other.iter.key()) {
             (Some(a), Some(b)) => a
@@ -184,23 +251,23 @@ impl<'a, C: Comparer> Ord for MergingIteratorHeapEntry<'a, C> {
     }
 }
 
-enum MergingIteratorState<'a, C: Comparer> {
+enum MergingIteratorState<'i, C: Comparer> {
     // The merging iterator still has to poll some source iterators.
     Initializing {
-        sources: Vec<MergingIteratorHeapEntry<'a, C>>,
+        sources: Vec<MergingIteratorHeapEntry<'i, C>>,
     },
     // The merging iterator has been initialized
     Active,
 }
 
-pub struct MergingIterator<'a, C: Comparer> {
-    state: MergingIteratorState<'a, C>,
-    heap: BinaryHeap<MergingIteratorHeapEntry<'a, C>>,
+pub struct MergingIterator<'i, C: Comparer> {
+    state: MergingIteratorState<'i, C>,
+    heap: BinaryHeap<MergingIteratorHeapEntry<'i, C>>,
     current: Option<(InternalKey<C>, Bytes)>,
 }
 
-impl<'a, C: Comparer> MergingIterator<'a, C> {
-    pub fn new(sources: Vec<MergingIteratorHeapEntry<'a, C>>) -> Self {
+impl<'i, C: Comparer> MergingIterator<'i, C> {
+    pub fn new(sources: Vec<MergingIteratorHeapEntry<'i, C>>) -> Self {
         Self {
             state: MergingIteratorState::Initializing { sources },
             heap: Default::default(),
@@ -209,7 +276,7 @@ impl<'a, C: Comparer> MergingIterator<'a, C> {
     }
 }
 
-impl<'a, C: Comparer> StorageIterator<'a, C> for MergingIterator<'a, C> {
+impl<'i, C: Comparer> StorageIterator<'i, C> for MergingIterator<'i, C> {
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>> {
         if let MergingIteratorState::Initializing { ref mut sources } = self.state {
             trace!(sources = sources.len(), "initializing merging iterator");
@@ -286,6 +353,39 @@ impl<'a, C: Comparer> StorageIterator<'a, C> for MergingIterator<'a, C> {
         }
     }
 
+    fn poll_seek(&mut self, key: &[u8], cx: &mut task::Context<'_>) -> Poll<StorageResult<()>> {
+        // seek all sources in the heap
+        let mut entries: Vec<_> = self.heap.drain().collect();
+
+        // also seek any still-initializing sources
+        if let MergingIteratorState::Initializing { ref mut sources } = self.state {
+            entries.append(sources);
+            self.state = MergingIteratorState::Active;
+        }
+
+        let mut i = 0;
+        while i < entries.len() {
+            match entries[i].iter.poll_seek(key, cx) {
+                Poll::Ready(Ok(())) => {
+                    if entries[i].iter.key().is_some() {
+                        i += 1;
+                    } else {
+                        // seeked past end, discard
+                        entries.swap_remove(i);
+                    }
+                }
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            }
+        }
+
+        // rebuild heap from seeked sources, with the new ordering intact
+        self.current = None;
+        self.heap = entries.into_iter().collect();
+
+        Poll::Ready(Ok(()))
+    }
+
     fn key(&self) -> Option<&InternalKey<C>> {
         self.current.as_ref().map(|(k, _v)| k)
     }
@@ -295,19 +395,19 @@ impl<'a, C: Comparer> StorageIterator<'a, C> for MergingIterator<'a, C> {
     }
 }
 
-pub struct DeduplicatingIterator<'a, I, C>
+pub struct DeduplicatingIterator<'i, I, C>
 where
-    I: StorageIterator<'a, C>,
+    I: StorageIterator<'i, C>,
     C: Comparer,
 {
     inner: I,
     last_key: Option<Bytes>,
-    _marker: PhantomData<(&'a (), C)>,
+    _marker: PhantomData<(&'i (), C)>,
 }
 
-impl<'a, I, C> DeduplicatingIterator<'a, I, C>
+impl<'i, I, C> DeduplicatingIterator<'i, I, C>
 where
-    I: StorageIterator<'a, C>,
+    I: StorageIterator<'i, C>,
     C: Comparer,
 {
     pub fn new(inner: I) -> Self {
@@ -319,9 +419,9 @@ where
     }
 }
 
-impl<'a, I, C> StorageIterator<'a, C> for DeduplicatingIterator<'a, I, C>
+impl<'i, I, C> StorageIterator<'i, C> for DeduplicatingIterator<'i, I, C>
 where
-    I: StorageIterator<'a, C>,
+    I: StorageIterator<'i, C>,
     C: Comparer,
 {
     fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>> {
@@ -345,6 +445,91 @@ where
                 other => return other,
             }
         }
+    }
+
+    fn poll_seek(&mut self, key: &[u8], cx: &mut task::Context<'_>) -> Poll<StorageResult<()>> {
+        trace!(inner = type_name::<I>(), "seeking deduplicating iterator");
+        loop {
+            match self.inner.poll_next(cx) {
+                Poll::Ready(Ok(Some(()))) => {
+                    let new_key = self.inner.key().expect("just polled the iterator");
+                    // seek until we find the first key in range
+                    if C::compare_logical(new_key.key(), key).is_lt() {
+                        continue;
+                    }
+
+                    let last_key = self.last_key.as_ref();
+
+                    // if we have had a key already and the new one is logically equal
+                    if let Some(last_key) = last_key
+                        && C::compare_logical(new_key.key(), last_key).is_eq()
+                    {
+                        // skip this key
+                        continue;
+                    }
+                    self.last_key = Some(new_key.key().clone());
+                    return Poll::Ready(Ok(()));
+                }
+                other => return other.map(|r| r.map(|_| ())),
+            }
+        }
+    }
+
+    fn key(&self) -> Option<&InternalKey<C>> {
+        self.inner.key()
+    }
+
+    fn value(&self) -> Option<&Bytes> {
+        self.inner.value()
+    }
+}
+
+pub struct SnapshotIterator<'i, I, C>
+where
+    I: StorageIterator<'i, C>,
+    C: Comparer,
+{
+    inner: I,
+    snapshot: SeqNum,
+    _marker: PhantomData<&'i C>,
+}
+
+impl<'i, I, C> SnapshotIterator<'i, I, C>
+where
+    I: StorageIterator<'i, C>,
+    C: Comparer,
+{
+    pub fn new(inner: I, snapshot: SeqNum) -> Self {
+        Self {
+            inner,
+            snapshot,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'i, I, C> StorageIterator<'i, C> for SnapshotIterator<'i, I, C>
+where
+    I: StorageIterator<'i, C>,
+    C: Comparer,
+{
+    fn poll_next(&mut self, cx: &mut task::Context<'_>) -> Poll<StorageResult<Option<()>>> {
+        loop {
+            match self.inner.poll_next(cx) {
+                Poll::Ready(Ok(Some(()))) => {
+                    let key = self.inner.key().unwrap();
+                    if key.trailer().seqnum() <= self.snapshot {
+                        return Poll::Ready(Ok(Some(())));
+                    }
+                    // seqnum too high, skip and keep polling
+                }
+                other => return other,
+            }
+        }
+    }
+
+    fn poll_seek(&mut self, key: &[u8], cx: &mut task::Context<'_>) -> Poll<StorageResult<()>> {
+        self.inner.poll_seek(key, cx)
     }
 
     fn key(&self) -> Option<&InternalKey<C>> {
@@ -408,6 +593,23 @@ mod tests {
             } else {
                 Poll::Ready(Ok(None))
             }
+        }
+
+        fn poll_seek(&mut self, key: &[u8], cx: &mut task::Context<'_>) -> Poll<StorageResult<()>> {
+            if self.pending_once {
+                self.pending_once = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            self.pos = match self
+                .data
+                .iter()
+                .position(|(k, _)| C::compare_prefix(k.key(), key) != std::cmp::Ordering::Less)
+            {
+                Some(i) => i + 1,
+                None => self.data.len() + 1,
+            };
+            Poll::Ready(Ok(()))
         }
 
         fn key(&self) -> Option<&InternalKey<C>> {

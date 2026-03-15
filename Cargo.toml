@@ -16,6 +16,13 @@ name = "tempest"
 path = "src/main.rs"
 
 [dependencies]
+tempest_core = { workspace = true }
+tempest_engine = { workspace = true }
+tokio = { workspace = true }
+tokio-uring = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-tree = { workspace = true }
 
 [workspace.dependencies]
 arc-swap = "1.8.2"
@@ -46,3 +53,5 @@ zerocopy = { version = "0.8.39", features = ["derive", "std"] }
 
 tempest_core = { path = "./tempest_core" }
 tempest_kv = { path = "./tempest_kv" }
+tempest_tql = { path = "./tempest_tql" }
+tempest_engine = { path = "./tempest_engine" }

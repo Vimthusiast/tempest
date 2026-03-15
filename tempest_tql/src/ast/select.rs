@@ -1,8 +1,8 @@
-use std::{borrow::Cow, ops::Range};
+use std::ops::Range;
 
 use crate::{
-    Parser, ParserError, ParserErrorKind,
-    ast::{Ident, TablePath},
+    Parser, ParseError, ParserErrorKind,
+    ast::{Ident, Path},
     lexer::Token,
 };
 
@@ -22,13 +22,13 @@ pub struct Projection<'a> {
 pub struct SelectFromStmt<'a> {
     pub span: Range<usize>,
     pub projection: Projection<'a>,
-    pub table: TablePath<'a>,
+    pub table: Path<'a>,
     // TODO: selection - filter out columns, based on a predicate expression
     // selection: Selection<'a>
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_projection(&mut self) -> Result<Projection<'a>, ParserError> {
+    pub(crate) fn parse_projection(&mut self) -> Result<Projection<'a>, ParseError> {
         let tok = self.lexer.peek();
         match tok.token {
             Token::Asterisk => {
@@ -52,16 +52,12 @@ impl<'a> Parser<'a> {
                         Token::Comma => self.lexer.advance(),
                         Token::From => break,
                         _ => {
-                            let err = ParserError {
+                            let err = ParseError {
                                 span: tok.span.clone(),
-                                kind: ParserErrorKind::UnexpectedToken {
-                                    expected_list: &[
-                                        Token::Identifier(Cow::Borrowed("")),
-                                        Token::Comma,
-                                        Token::From,
-                                    ],
-                                    got: tok.token.clone().into_static(),
-                                },
+                                kind: ParserErrorKind::unexpected_token(
+                                    &[Token::empty_ident(), Token::Comma, Token::From],
+                                    &tok.token,
+                                ),
                             };
                             if tok.token == Token::Eof {
                                 return Err(err);
@@ -76,21 +72,21 @@ impl<'a> Parser<'a> {
                     kind: ProjectionKind::Columns(columns),
                 })
             }
-            _ => Err(ParserError {
+            _ => Err(ParseError {
                 span: tok.span.clone(),
-                kind: ParserErrorKind::UnexpectedToken {
-                    expected_list: &[Token::Asterisk, Token::Identifier(Cow::Borrowed(""))],
-                    got: tok.token.clone().into_static(),
-                },
+                kind: ParserErrorKind::unexpected_token(
+                    &[Token::Asterisk, Token::empty_ident()],
+                    &tok.token,
+                ),
             }),
         }
     }
 
-    pub(crate) fn parse_select_stmt(&mut self) -> Result<SelectFromStmt<'a>, ParserError> {
+    pub(crate) fn parse_select_stmt(&mut self) -> Result<SelectFromStmt<'a>, ParseError> {
         self.current_span.start = self.consume(&[Token::Select])?.span.start;
         let projection = self.parse_projection()?;
         self.consume(&[Token::From])?;
-        let table = self.parse_table_path()?;
+        let table = self.parse_path()?;
         // ...selection/filtering goes here...
         self.consume(&[Token::Semicolon])?;
         Ok(SelectFromStmt {

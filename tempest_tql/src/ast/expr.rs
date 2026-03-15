@@ -1,6 +1,6 @@
 use std::{borrow::Cow, ops::Range};
 
-use crate::{Parser, ParserError, ParserErrorKind, lexer::Token};
+use crate::{Parser, ParseError, ParserErrorKind, lexer::Token};
 
 //pub enum BinaryOpKind {
 //    Eq, Gt, Lt, Gte, Lte,
@@ -27,7 +27,7 @@ pub struct Expr<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_primary_expr(&mut self) -> Result<Expr<'a>, ParserError> {
+    pub(crate) fn parse_primary_expr(&mut self) -> Result<Expr<'a>, ParseError> {
         let tok = self.lexer.next();
         match &tok.token {
             Token::IntegerLiteral(s) => Ok(Expr {
@@ -46,22 +46,22 @@ impl<'a> Parser<'a> {
                 span: tok.span.clone(),
                 kind: ExprKind::Bool(false),
             }),
-            _ => Err(ParserError {
+            _ => Err(ParseError {
                 span: tok.span.clone(),
-                kind: ParserErrorKind::UnexpectedToken {
-                    expected_list: &[
-                        Token::IntegerLiteral(Cow::Borrowed("")),
-                        Token::StringLiteral(Cow::Borrowed("")),
+                kind: ParserErrorKind::unexpected_token(
+                    &[
+                        Token::empty_ident(),
+                        Token::empty_string(),
                         Token::True,
                         Token::False,
                     ],
-                    got: tok.token.clone().into_static(),
-                },
+                    &tok.token,
+                ),
             }),
         }
     }
 
-    pub(crate) fn parse_expr(&mut self) -> Result<Expr<'a>, ParserError> {
+    pub(crate) fn parse_expr(&mut self) -> Result<Expr<'a>, ParseError> {
         // for now, this just supports primary expressions, but computations and column references
         // will come later, when implementing complex selections in the 'where'-clause
         self.parse_primary_expr()

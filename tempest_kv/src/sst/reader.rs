@@ -12,7 +12,7 @@ use tokio_uring::buf::BoundedBuf;
 use zerocopy::FromBytes;
 
 use crate::{
-    base::{Comparer, InternalKey, SST_MAGICNUM, StorageResult},
+    base::{Comparer, InternalKey, KeyTrailer, SST_MAGICNUM, StorageResult},
     iterator::StorageIterator,
     sst::{
         SstFooter,
@@ -87,6 +87,44 @@ impl<F: FioFile, C: Comparer> StorageIterator<'_, C> for SstIterator<F, C> {
                 res?;
                 Ok(buf.into_inner().freeze())
             }));
+        }
+    }
+
+    fn poll_seek(
+        &mut self,
+        key: &[u8],
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<StorageResult<()>> {
+        // reset state
+        self.loading = None;
+        self.current_key = None;
+        self.current_block = None;
+
+        // find the block that may contain the seek key
+        let search_key = InternalKey::<C, &[u8]>::new(key, KeyTrailer::MAX);
+        let Some((index_pos, block_offset, block_size)) = self.index.get_block_for(&search_key)
+        else {
+            // key is past the end of the SST
+            return Poll::Ready(Ok(()));
+        };
+
+        // start searching at the right block
+        self.index_pos = index_pos;
+
+        // start loading the block
+        let file = self.file.clone();
+        self.loading = Some(Box::pin(async move {
+            let buf = BytesMut::zeroed(block_size as usize);
+            let (res, buf) = file.read_exact_at(buf.slice(..), block_offset).await;
+            res?;
+            Ok(buf.into_inner().freeze())
+        }));
+
+        // drive poll_next to load the block and advance to the seek key
+        match self.poll_next(cx) {
+            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -168,11 +206,11 @@ impl<F: FioFile, C: Comparer> SstReader<F, C> {
         trace!("bloom filter positive");
 
         // find the block that may contain this key
-        let Some((block_offset, block_size)) = self.index.get_block_for(key) else {
+        let Some((index_pos, block_offset, block_size)) = self.index.get_block_for(key) else {
             trace!("not found in index");
             return Ok(None);
         };
-        trace!(block_offset, block_size=?ByteSize(block_size as u64), "found block for key in index");
+        trace!(index_pos, block_offset, block_size=?ByteSize(block_size as u64), "found block for key in index");
 
         // load the block
         let block_buf = BytesMut::zeroed(block_size as usize);

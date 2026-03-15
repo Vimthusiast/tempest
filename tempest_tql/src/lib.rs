@@ -14,34 +14,46 @@ extern crate tracing;
 pub mod ast;
 pub mod lexer;
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Error)]
 pub enum ParserErrorKind {
     #[display("lexer error: {}", _0)]
     LexerError(LexerErrorKind),
-    #[display(
-        "unexpected token: expected one of {} but got {}",
-        expected_list.iter().map(|t| t.name()).join(", "),
-        got.name()
-    )]
-    UnexpectedToken {
-        expected_list: &'static [Token<'static>],
-        got: Token<'static>,
-    },
+    #[display("unexpected token: {}", _0)]
+    UnexpectedToken(#[error(not(source))] String),
     #[display("duplicate primary key")]
     DuplicatePrimaryKey,
     #[display("missing primary key")]
     MissingPrimaryKey,
 }
 
+impl ParserErrorKind {
+    pub(crate) fn unexpected_token(expected_list: &[Token], got: &Token) -> Self {
+        debug_assert_ne!(expected_list.len(), 0, "supply a list of expected tokens");
+        if expected_list.len() == 1 {
+            Self::UnexpectedToken(format!(
+                "expected {}, but got {}",
+                expected_list[0].name(),
+                got.name()
+            ))
+        } else {
+            Self::UnexpectedToken(format!(
+                "expected one of: {}, but got {}",
+                expected_list.iter().map(|t| t.name()).join(", "),
+                got.name()
+            ))
+        }
+    }
+}
+
 #[derive(Debug, Display, Error)]
 #[display("parser error at {:?}: {}", span, kind)]
-pub struct ParserError {
+pub struct ParseError {
     span: Range<usize>,
     kind: ParserErrorKind,
 }
 
 // flatten the lexer error's span into the parser error
-impl From<LexerError> for ParserError {
+impl From<LexerError> for ParseError {
     fn from(value: LexerError) -> Self {
         Self {
             span: value.span,
@@ -53,7 +65,7 @@ impl From<LexerError> for ParserError {
 pub(crate) struct Parser<'a> {
     lexer: Lexer<'a>,
     statements: Vec<Stmt<'a>>,
-    errors: Vec<ParserError>,
+    errors: Vec<ParseError>,
     current_span: Range<usize>,
 }
 
@@ -63,19 +75,16 @@ impl<'a> Parser<'a> {
     /// returns a [`ParserError`] of kind [`ParserErrorKind::UnexpectedToken`].
     pub(crate) fn consume(
         &mut self,
-        expected_list: &'static [Token<'static>],
-    ) -> Result<&SpannedToken<'a>, ParserError> {
+        expected_list: &[Token],
+    ) -> Result<&SpannedToken<'a>, ParseError> {
         let tok = self.lexer.next();
         if expected_list.contains(&tok.token) {
             self.current_span.end = tok.span.end;
             Ok(tok)
         } else {
-            Err(ParserError {
+            Err(ParseError {
                 span: tok.span.clone(),
-                kind: ParserErrorKind::UnexpectedToken {
-                    expected_list,
-                    got: tok.token.clone().into_static(),
-                },
+                kind: ParserErrorKind::unexpected_token(expected_list, &tok.token),
             })
         }
     }
@@ -105,7 +114,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_all(mut self) -> (Vec<Stmt<'a>>, Vec<ParserError>) {
+    fn parse_all(mut self) -> (Vec<Stmt<'a>>, Vec<ParseError>) {
         while !self.lexer.reached_eof() {
             match self.parse_stmt() {
                 Ok(stmt) => self.statements.push(stmt),
@@ -131,7 +140,7 @@ impl<'a> Parser<'a> {
 }
 
 #[instrument(skip_all, level = "debug")]
-pub fn parse<'a>(source: &'a str) -> (Vec<Stmt<'a>>, Vec<ParserError>) {
+pub fn parse<'a>(source: &'a str) -> (Vec<Stmt<'a>>, Vec<ParseError>) {
     Parser::new(source).parse_all()
 }
 
@@ -142,7 +151,7 @@ mod tests {
     use super::*;
 
     /// If `errors` is not empty, prints them using the `Display` implementation, and `panic!`s.
-    fn assert_no_errors(errors: &[ParserError]) {
+    fn assert_no_errors(errors: &[ParseError]) {
         if !errors.is_empty() {
             for err in errors {
                 eprintln!("{}", err);
@@ -155,7 +164,7 @@ mod tests {
     fn consume_wrong_token_returns_unexpected_token() {
         let mut parser = Parser::new("table");
         let err = parser.consume(&[Token::Create]).unwrap_err();
-        assert!(matches!(err.kind, ParserErrorKind::UnexpectedToken { .. }));
+        assert!(matches!(err.kind, ParserErrorKind::UnexpectedToken(_)));
     }
 
     #[test]
@@ -166,7 +175,7 @@ mod tests {
         let Stmt::CreateDatabase(CreateDatabaseStmt { name, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(name.name, "mydb");
+        assert_eq!(name.name, "mydb".into());
         assert_eq!(statements.len(), 1);
     }
 
@@ -181,10 +190,10 @@ mod tests {
         let Stmt::CreateTable(CreateTableStmt { path, ty, body, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(path.database.name, "mydb");
-        assert_eq!(path.table.name, "users");
-        assert_eq!(ty.name.name, "User");
-        assert_eq!(body.primary_key.columns[0].name, "id");
+        assert_eq!(path.database.as_ref().unwrap().name, "mydb".into());
+        assert_eq!(path.name.name, "users".into());
+        assert_eq!(ty.name.name, "User".into());
+        assert_eq!(body.primary_key.columns[0].name, "id".into());
         assert_eq!(body.primary_key.columns.len(), 1);
         assert_eq!(statements.len(), 1);
     }
@@ -199,17 +208,32 @@ mod tests {
         let (statements, errors) = parse(source);
         assert_no_errors(&errors);
 
-        let Stmt::CreateTy(CreateTyStmt { name, body, .. }) = &statements[0] else {
+        let Stmt::CreateTy(CreateTyStmt { path, body, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
 
-        assert_eq!(name.name, "User");
-        assert_eq!(body.fields[0].name.name, "id");
-        assert_eq!(body.fields[0].ty.name.name, "Int64");
-        assert_eq!(body.fields[1].name.name, "username");
-        assert_eq!(body.fields[1].ty.name.name, "String");
+        assert_eq!(path.name.name, "User".into());
+        assert_eq!(body.fields[0].name.name, "id".into());
+        assert_eq!(body.fields[0].ty.name.name, "Int64".into());
+        assert_eq!(body.fields[1].name.name, "username".into());
+        assert_eq!(body.fields[1].ty.name.name, "String".into());
         assert_eq!(body.fields.len(), 2);
         assert_eq!(statements.len(), 1);
+    }
+
+    #[test]
+    fn test_create_type_qualified_path() {
+        let source = "create type main.User { id: Int64 };";
+
+        let (statements, errors) = parse(source);
+        assert_no_errors(&errors);
+
+        let Stmt::CreateTy(CreateTyStmt { path, .. }) = &statements[0] else {
+            panic!("invalid statement type: {:?}", &statements[0]);
+        };
+
+        assert_eq!(path.database.as_ref().unwrap().name, "main".into());
+        assert_eq!(path.name.name, "User".into());
     }
 
     #[test]
@@ -220,14 +244,14 @@ mod tests {
         let (statements, errors) = parse(source);
         assert!(matches!(
             errors[0].kind,
-            ParserErrorKind::UnexpectedToken { .. }
+            ParserErrorKind::UnexpectedToken(_),
         ));
         assert_eq!(errors.len(), 1);
 
         let Stmt::CreateDatabase(CreateDatabaseStmt { name, .. }) = &statements[0] else {
             panic!("invalid statement type: {:?}", &statements[0]);
         };
-        assert_eq!(name.name, "main");
+        assert_eq!(name.name, "main".into());
     }
 
     #[test]
@@ -238,7 +262,7 @@ mod tests {
         let Stmt::InsertInto(stmt) = &stmts[0] else {
             panic!("expected insert")
         };
-        assert_eq!(stmt.values.values[0].column.name, "id");
+        assert_eq!(stmt.values.values[0].column.name, "id".into());
         assert!(
             matches!(stmt.values.values[0].value.kind, ExprKind::IntegerLiteral(ref s) if s == "42")
         );
@@ -253,7 +277,7 @@ mod tests {
             panic!("expected insert")
         };
         assert_eq!(stmt.values.values.len(), 2);
-        assert_eq!(stmt.values.values[1].column.name, "username");
+        assert_eq!(stmt.values.values[1].column.name, "username".into());
         assert!(
             matches!(stmt.values.values[1].value.kind, ExprKind::StringLiteral(ref s) if s == "john")
         );
@@ -267,8 +291,8 @@ mod tests {
         let Stmt::InsertInto(stmt) = &stmts[0] else {
             panic!("expected insert")
         };
-        assert_eq!(stmt.table.database.name, "mydb");
-        assert_eq!(stmt.table.table.name, "users");
+        assert_eq!(stmt.table.database.as_ref().unwrap().name, "mydb".into());
+        assert_eq!(stmt.table.name.name, "users".into());
     }
 
     #[test]
@@ -280,7 +304,7 @@ mod tests {
             panic!("expected select")
         };
         assert!(matches!(stmt.projection.kind, ProjectionKind::All));
-        assert_eq!(stmt.table.table.name, "users");
+        assert_eq!(stmt.table.name.name, "users".into());
     }
 
     #[test]
@@ -295,7 +319,7 @@ mod tests {
             panic!("expected columns")
         };
         assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].name, "id");
-        assert_eq!(cols[1].name, "username");
+        assert_eq!(cols[0].name, "id".into());
+        assert_eq!(cols[1].name, "username".into());
     }
 }

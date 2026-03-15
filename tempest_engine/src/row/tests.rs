@@ -1,40 +1,47 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use super::{decoder::*, encoder::*};
 
 use crate::{
     base::{EngineComparer, KeySpace},
-    catalog::schema::{ColumnDef, DatabaseId, TableId, TableSchema},
+    catalog::schema::{FieldDef, FieldId, TableId},
     ctrl::hlc::HlcTimestamp,
+    row::resolved::ResolvedTable,
     types::{TempestType, TempestValue},
 };
 
 use bytes::BytesMut;
 use tempest_kv::base::Comparer;
 
-fn make_schema() -> (TableId, TableSchema) {
+fn make_resolved() -> (TableId, BTreeMap<FieldId, FieldDef>, Vec<FieldId>) {
     let table_id = TableId(1);
-    let schema = TableSchema {
-        database_id: DatabaseId(0),
-        name: "users".into(),
-        columns: vec![
-            ColumnDef {
-                name: "id".into(),
-                ty: TempestType::Int64,
-            },
-            ColumnDef {
-                name: "name".into(),
-                ty: TempestType::String,
-            },
-        ],
-        primary_key: vec![0], // `id` is the PK
-    };
-    (table_id, schema)
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        FieldId(0),
+        FieldDef {
+            name: "id".into(),
+            ty: TempestType::Int64,
+        },
+    );
+    fields.insert(
+        FieldId(1),
+        FieldDef {
+            name: "name".into(),
+            ty: TempestType::String,
+        },
+    );
+    let primary_key = vec![FieldId(0)];
+    (table_id, fields, primary_key)
 }
 
 fn encode(row: &[TempestValue<'_>], hlc: HlcTimestamp) -> (BytesMut, BytesMut) {
-    let (table_id, schema) = make_schema();
-    let encoder = RowEncoder::new(table_id, &schema);
+    let (table_id, fields, primary_key) = make_resolved();
+    let resolved = ResolvedTable {
+        id: table_id,
+        fields: &fields,
+        primary_key: &primary_key,
+    };
+    let encoder = RowEncoder::new(&resolved);
     let mut key_buf = BytesMut::new();
     let mut val_buf = BytesMut::new();
     encoder.encode_row(row, hlc, &mut key_buf, &mut val_buf);
@@ -57,9 +64,14 @@ fn test_encode_decode_row() {
         )
     });
 
-    let (table_id, schema) = make_schema();
-    let encoder = RowEncoder::new(table_id, &schema);
-    let decoder = RowDecoder::new(&schema);
+    let (table_id, fields, primary_key) = make_resolved();
+    let resolved = ResolvedTable {
+        id: table_id,
+        fields: &fields,
+        primary_key: &primary_key,
+    };
+    let encoder = RowEncoder::new(&resolved);
+    let decoder = RowDecoder::new(&resolved);
 
     for (hlc, (id, name)) in rows
         .into_iter()

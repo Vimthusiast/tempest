@@ -6,12 +6,16 @@ edition = "2024"
 [dependencies]
 bytes = { workspace = true }
 derive_more = { workspace = true }
+itertools = { workspace = true }
 serde = { workspace = true }
 strum = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 tempest_core = { workspace = true }
 tempest_kv = { workspace = true }
+tempest_tql = { workspace = true }
 
 [dev-dependencies]
 tempest_core = { workspace = true, features = ["testing"] }
+tempest_tql = { workspace = true, features = ["testing"] }

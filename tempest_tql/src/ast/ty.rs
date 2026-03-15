@@ -1,24 +1,16 @@
 use std::{borrow::Cow, ops::Range};
 
-use crate::{Parser, ParserError, ParserErrorKind, ast::Ident, lexer::Token};
-
-#[derive(Debug)]
-pub struct TyPath<'a> {
-    pub span: Range<usize>,
-    /// The full identifier of a type - syntax-wise.
-    ///
-    /// # Note
-    ///
-    /// In the future, this will be a `Vec<Ident>`, and allow for qualified paths, but we don't
-    /// have modules or anything right now, and won't during the MVP phase.
-    pub name: Ident<'a>,
-}
+use crate::{
+    Parser, ParseError, ParserErrorKind,
+    ast::{Ident, Path},
+    lexer::Token,
+};
 
 #[derive(Debug)]
 pub struct TyDeclField<'a> {
     pub span: Range<usize>,
     pub name: Ident<'a>,
-    pub ty: TyPath<'a>,
+    pub ty: Path<'a>,
 }
 
 #[derive(Debug)]
@@ -30,25 +22,15 @@ pub struct TyDeclBody<'a> {
 #[derive(Debug)]
 pub struct CreateTyStmt<'a> {
     pub span: Range<usize>,
-    pub name: Ident<'a>,
+    pub path: Path<'a>,
     pub body: TyDeclBody<'a>,
 }
 
 impl<'a> Parser<'a> {
-    pub(crate) fn parse_ty_path(&mut self) -> Result<TyPath<'a>, ParserError> {
-        let name = self.parse_ident()?;
-        Ok(TyPath {
-            // same span as the inner ident, until qualified paths exist.
-            // currently, this is basically a new-type with a duplicated span.
-            span: name.span.clone(),
-            name,
-        })
-    }
-
-    pub(crate) fn parse_ty_decl_field(&mut self) -> Result<TyDeclField<'a>, ParserError> {
+    pub(crate) fn parse_ty_decl_field(&mut self) -> Result<TyDeclField<'a>, ParseError> {
         let name = self.parse_ident()?;
         self.consume(&[Token::Colon])?;
-        let ty = self.parse_ty_path()?;
+        let ty = self.parse_path()?;
 
         Ok(TyDeclField {
             span: name.span.start..ty.span.end,
@@ -57,7 +39,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_ty_decl_body(&mut self) -> Result<TyDeclBody<'a>, ParserError> {
+    fn parse_ty_decl_body(&mut self) -> Result<TyDeclBody<'a>, ParseError> {
         let span_start = self.consume(&[Token::LBrace])?.span.start;
         let mut fields = Vec::new();
         loop {
@@ -77,16 +59,12 @@ impl<'a> Parser<'a> {
                 Token::Comma => self.lexer.advance(),
                 Token::RBrace => break,
                 _ => {
-                    let err = ParserError {
+                    let err = ParseError {
                         span: tok.span.clone(),
-                        kind: ParserErrorKind::UnexpectedToken {
-                            expected_list: &[
-                                Token::Identifier(Cow::Borrowed("")),
-                                Token::Comma,
-                                Token::RBrace,
-                            ],
-                            got: tok.token.clone().into_static(),
-                        },
+                        kind: ParserErrorKind::unexpected_token(
+                            &[Token::empty_ident(), Token::Comma, Token::RBrace],
+                            &tok.token,
+                        ),
                     };
                     if tok.token == Token::Eof {
                         return Err(err);
@@ -104,14 +82,14 @@ impl<'a> Parser<'a> {
     }
 
     /// Assumes that `create` has already been parsed and the span is set.
-    pub(crate) fn parse_create_ty_stmt(&mut self) -> Result<CreateTyStmt<'a>, ParserError> {
+    pub(crate) fn parse_create_ty_stmt(&mut self) -> Result<CreateTyStmt<'a>, ParseError> {
         self.consume(&[Token::Type])?;
-        let name = self.parse_ident()?;
+        let path = self.parse_path()?;
         let body = self.parse_ty_decl_body()?;
         self.consume(&[Token::Semicolon])?;
         Ok(CreateTyStmt {
             span: self.current_span.clone(),
-            name,
+            path,
             body,
         })
     }

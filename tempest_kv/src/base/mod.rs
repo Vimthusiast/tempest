@@ -141,6 +141,8 @@ impl KeyKind {
 pub struct KeyTrailer(U64<LittleEndian>);
 
 impl KeyTrailer {
+    pub const MAX: Self = Self::new(SeqNum::MAX, KeyKind::MAX);
+
     pub const fn new(seqnum: SeqNum, kind: KeyKind) -> Self {
         Self(U64::new((seqnum.get() << 8) | (kind as u64)))
     }

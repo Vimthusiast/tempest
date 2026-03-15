@@ -13,7 +13,7 @@ pub(crate) struct SpannedToken<'a> {
     pub span: Range<usize>,
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Error)]
 pub enum LexerErrorKind {
     #[display("unknown token")]
     UnknownToken,
@@ -105,7 +105,7 @@ mod tests {
     fn lex_identifier() {
         let mut lexer = lex("users").0;
         let tok = lexer.next();
-        assert!(matches!(&tok.token, Token::Identifier(s) if s == "users"));
+        assert!(matches!(&tok.token, Token::Identifier(s) if *s == "users".into()));
     }
 
     #[test]

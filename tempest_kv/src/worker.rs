@@ -1,5 +1,6 @@
 use std::{path::PathBuf, thread};
 
+use bytes::Bytes;
 use tempest_core::fio::FioFS;
 use tokio::sync::{mpsc, oneshot};
 use tracing::Level;
@@ -9,6 +10,7 @@ use crate::{
     base::{Comparer, StorageError, StorageResult},
     batch::WriteBatch,
     config::StorageConfig,
+    iterator::StorageIterator,
 };
 
 #[derive(Debug)]
@@ -19,6 +21,8 @@ pub enum StorageCommand {
     },
     Scan {
         // TODO: implement scan via channel + snapshotting
+        seek_prefix: Bytes,
+        respond_to: oneshot::Sender<StorageResult<mpsc::Receiver<StorageResult<(Bytes, Bytes)>>>>,
     },
     Shutdown {
         respond_to: oneshot::Sender<StorageResult<()>>,
@@ -41,7 +45,21 @@ impl StorageHandle {
         rx.await?
     }
 
-    pub(crate) async fn shutdown(&self) -> StorageResult<()> {
+    pub async fn scan(
+        &self,
+        seek_prefix: Bytes,
+    ) -> StorageResult<mpsc::Receiver<StorageResult<(Bytes, Bytes)>>> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(StorageCommand::Scan {
+                seek_prefix,
+                respond_to: tx,
+            })
+            .await?;
+        rx.await?
+    }
+
+    pub async fn shutdown(&self) -> StorageResult<()> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(StorageCommand::Shutdown { respond_to: tx })
@@ -150,7 +168,45 @@ impl<F: FioFS, C: Comparer> StorageWorker<F, C> {
                 }
                 Ok(CommandControlFlow::Continue)
             }
-            StorageCommand::Scan {} => todo!(),
+            StorageCommand::Scan {
+                seek_prefix,
+                respond_to,
+            } => {
+                let (tx, rx) = mpsc::channel(64);
+                let _ = respond_to.send(Ok(rx));
+
+                let snapshot = self.storage.highest_seqnum();
+                let mut iter = self.storage.scan(snapshot).await?;
+                iter.seek(&seek_prefix).await?;
+
+                // read the first entry directly after seek without advancing
+                loop {
+                    match (iter.key(), iter.value()) {
+                        (Some(key), Some(value)) => {
+                            let key = key.key().clone();
+                            if !key.starts_with(&seek_prefix[..5]) {
+                                break;
+                            }
+                            let value = value.clone();
+                            if tx.send(Ok((key, value))).await.is_err() {
+                                break;
+                            }
+                            // now advance
+                            match iter.next().await {
+                                Ok(Some(())) => continue,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    let _ = tx.send(Err(e)).await;
+                                    break;
+                                }
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+
+                Ok(CommandControlFlow::Continue)
+            }
             StorageCommand::Shutdown { respond_to } => {
                 Ok(CommandControlFlow::Shutdown { respond_to })
             }

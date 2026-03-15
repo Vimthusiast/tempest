@@ -1,9 +1,8 @@
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tempest_core::{
     fio::FioFS,
@@ -56,11 +55,11 @@ pub(crate) struct ManifestEditV1 {
     pub(crate) seqnum_limit: Option<SeqNum>,
     pub(crate) filenum_limit: Option<u64>,
 
-    /// A list of new [`SstMetadata`] objects that register SST files to the [`SiloManifest`].
+    /// A list of new [`SstMetadata`] objects that register SST files to the [`StorageManifest`].
     pub(crate) ssts_added: Option<Vec<SstMetadata>>,
 
     /// A list of removed [`SstMetadata`] objects, identified by their level and file ID,
-    /// that register SST files to the [`SiloManifest`].
+    /// that register SST files to the [`StorageManifest`].
     pub(crate) ssts_removed: Option<Vec<SstDeletion>>,
 
     pub(crate) wal_filenums_added: Option<Vec<u64>>,

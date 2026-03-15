@@ -149,36 +149,37 @@ fn test_storage_scan_interleaving_and_deduplication() {
 
     let config = StorageConfig::for_testing();
     tokio_uring::start(async {
-        info!("starting first silo");
+        info!("starting first storage");
         {
-            let mut silo: Storage<_> = Storage::init(id, fs.clone(), storage_dir, config.clone())
-                .await
-                .unwrap();
+            let mut storage: Storage<_> =
+                Storage::init(id, fs.clone(), storage_dir, config.clone())
+                    .await
+                    .unwrap();
 
             // 1. write initial data and move to immutables
             let mut batch1 = WriteBatch::new();
             batch1.put(b"key_a", b"value_old");
-            silo.write(batch1).await.unwrap();
+            storage.write(batch1).await.unwrap();
 
             // force a flush
-            silo.test_force_freeze();
+            storage.test_force_freeze();
 
             // 2. write an update to "key_a" and a new "key_b"
             let mut batch2 = WriteBatch::new();
             batch2.put(b"key_a", b"value_new");
             batch2.put(b"key_b", b"value_b");
-            silo.write(batch2).await.unwrap();
+            storage.write(batch2).await.unwrap();
 
             // force a flush
-            silo.test_force_freeze();
+            storage.test_force_freeze();
 
             // 3. delete "key_b" in the currently active memtable
             let mut batch3 = WriteBatch::new();
             batch3.delete(b"key_b");
-            silo.write(batch3).await.unwrap();
+            storage.write(batch3).await.unwrap();
 
             // --- perform the scan using the clean interface ---
-            let mut scanner = silo.scan().await.unwrap();
+            let mut scanner = storage.scan(storage.highest_seqnum()).await.unwrap();
             let mut results = Vec::new();
 
             while let Ok(Some(())) = scanner.next().await {
@@ -203,17 +204,18 @@ fn test_storage_scan_interleaving_and_deduplication() {
             assert_eq!(results[1].0, "key_b");
             assert_eq!(results[1].2, KeyKind::Delete);
 
-            silo.shutdown().await.unwrap();
+            storage.shutdown().await.unwrap();
         }
 
-        info!("starting second silo");
+        info!("starting second storage");
         {
             // re-open and verify the same scan results hold after recovery
-            let mut silo: Storage<_> = Storage::init(id, fs.clone(), storage_dir, config.clone())
-                .await
-                .unwrap();
+            let mut storage: Storage<_> =
+                Storage::init(id, fs.clone(), storage_dir, config.clone())
+                    .await
+                    .unwrap();
 
-            let mut scanner = silo.scan().await.unwrap();
+            let mut scanner = storage.scan(storage.highest_seqnum()).await.unwrap();
             let mut results = Vec::new();
             while let Some(()) = scanner.next().await.unwrap() {
                 let internal_key = scanner.key().unwrap();
@@ -236,11 +238,9 @@ fn test_storage_scan_interleaving_and_deduplication() {
             assert_eq!(results[1].0, "key_b");
             assert_eq!(results[1].2, KeyKind::Delete);
 
-            silo.shutdown().await.unwrap();
+            storage.shutdown().await.unwrap();
         }
     });
-
-    fs.debug();
 }
 
 #[test]

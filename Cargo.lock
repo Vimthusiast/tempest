@@ -589,6 +589,15 @@ dependencies = [
 [[package]]
 name = "tempest-db"
 version = "0.0.1"
+dependencies = [
+ "tempest_core",
+ "tempest_engine",
+ "tokio",
+ "tokio-uring",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-tree",
+]
 
 [[package]]
 name = "tempest_core"
@@ -616,10 +625,13 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "derive_more",
+ "itertools",
  "serde",
  "strum",
  "tempest_core",
  "tempest_kv",
+ "tempest_tql",
+ "tokio",
  "tracing",
 ]
 
@@ -655,6 +667,7 @@ dependencies = [
  "itertools",
  "logos",
  "strum",
+ "tempest_core",
  "tracing",
 ]
 

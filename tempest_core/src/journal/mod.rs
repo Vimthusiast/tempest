@@ -259,10 +259,13 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
 
         let mut journal_details = Vec::new();
         while let Some(entry) = entries.try_next().await? {
+            trace!(path=?entry.path(), "got dir entry");
             let file = fs.opts().read(true).write(true).open(entry.path()).await?;
 
             scratch.resize(JOURNAL_HEADER_SIZE, 0);
-            let (res, sliced_scratch) = file.read_exact_at(scratch.slice(..), 0).await;
+            let (res, sliced_scratch) = file
+                .read_exact_at(scratch.slice(..JOURNAL_HEADER_SIZE), 0)
+                .await;
             res?;
             scratch = sliced_scratch.into_inner();
             let header = match JournalHeader::decode_from_slice(&scratch) {
@@ -385,7 +388,9 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
 
         // read edit prefix
         scratch.resize(EDIT_PREFIX_SIZE, 0);
-        let (res, sliced_scratch) = file.read_exact_at(scratch.slice(..), current_filepos).await;
+        let (res, sliced_scratch) = file
+            .read_exact_at(scratch.slice(..EDIT_PREFIX_SIZE), current_filepos)
+            .await;
         let mut scratch = sliced_scratch.into_inner();
         if let Err(e) = res {
             return (Err(e.into()), scratch);
@@ -396,7 +401,9 @@ impl<T: Replayable, F: FioFS> Journal<T, F> {
 
         // read edit body
         scratch.resize(prefix.len() as usize, 0);
-        let (res, sliced_scratch) = file.read_exact_at(scratch.slice(..), current_filepos).await;
+        let (res, sliced_scratch) = file
+            .read_exact_at(scratch.slice(..prefix.len() as usize), current_filepos)
+            .await;
         let scratch = sliced_scratch.into_inner();
         if let Err(e) = res {
             return (Err(e.into()), scratch);

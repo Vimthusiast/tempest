@@ -106,16 +106,15 @@ impl<C: Comparer> IndexReader<C> {
         )
     }
 
-    /// Returns the (block_offset, block_size) of the block that may contain `key`,
+    /// Returns the (index_pos, block_offset, block_size) of the block that may contain `key`,
     /// or None if the key is out of range.
-    pub fn get_block_for<K: AsRef<[u8]>>(&self, key: &InternalKey<C, K>) -> Option<(u64, u32)> {
-        let key = InternalKey::<C, &[u8]>::new(key.key().as_ref(), key.trailer());
+    pub fn get_block_for<K: AsRef<[u8]>>(&self, key: &InternalKey<C, K>) -> Option<(usize, u64, u32)> {
         let (entries, offsets) = parse_index(&self.buf);
 
         // binary search for the first entry whose key >= search key
         let result = offsets.binary_search_by(|offset| {
             let (entry_key, _, _) = Self::decode_entry(entries, offset.get() as usize);
-            entry_key.cmp(&key)
+            entry_key.cmp(&key.slice_key())
         });
 
         // we still check if first > key, because we just have the last block key in the index
@@ -126,7 +125,7 @@ impl<C: Comparer> IndexReader<C> {
         }
 
         let (_, block_offset, block_size) = Self::decode_entry(entries, offsets[i].get() as usize);
-        Some((block_offset, block_size))
+        Some((i, block_offset, block_size))
     }
 
     pub fn get_block_by_index(&self, index: usize) -> Option<(u64, u32)> {
