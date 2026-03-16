@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "tempest_core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bincode",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "tempest_engine"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "derive_more",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "tempest_kv"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bincode",
  "bytes",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "tempest_tql"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "derive_more",
  "itertools",

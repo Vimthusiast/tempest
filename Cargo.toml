@@ -10,6 +10,9 @@ members = [
 name = "tempest-db"
 version = "0.0.1"
 edition = "2024"
+description = "A typed, distributed database with first-class schema evolution"
+license = "MIT"
+repository = "https://github.com/Vimthusiast/tempest"
 
 [[bin]]
 name = "tempest"
@@ -56,7 +59,7 @@ tracing-tree = "0.4.1"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 zerocopy = { version = "0.8.39", features = ["derive", "std"] }
 
-tempest_core = { path = "./tempest_core" }
-tempest_kv = { path = "./tempest_kv" }
-tempest_tql = { path = "./tempest_tql" }
-tempest_engine = { path = "./tempest_engine" }
+tempest_core = { path = "./tempest_core", version = "0.0.1" }
+tempest_kv = { path = "./tempest_kv", version = "0.0.1" }
+tempest_tql = { path = "./tempest_tql", version = "0.0.1" }
+tempest_engine = { path = "./tempest_engine", version = "0.0.1" }

@@ -1,7 +1,10 @@
 [package]
 name = "tempest_kv"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
+description = "Key-Value storage implementation for the Tempest database"
+license = "MIT"
+repository = "https://github.com/Vimthusiast/tempest"
 
 [dependencies]
 bincode = { workspace = true }

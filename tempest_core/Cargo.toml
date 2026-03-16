@@ -1,7 +1,10 @@
 [package]
 name = "tempest_core"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
+description = "Core utilities and primitives for the Tempest database"
+license = "MIT"
+repository = "https://github.com/Vimthusiast/tempest"
 
 [features]
 testing = ["dep:tracing-subscriber", "dep:tracing-tree"]
