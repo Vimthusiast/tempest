@@ -48,8 +48,8 @@ impl ParserErrorKind {
 #[derive(Debug, Display, Error)]
 #[display("parser error at {:?}: {}", span, kind)]
 pub struct ParseError {
-    span: Range<usize>,
-    kind: ParserErrorKind,
+    pub span: Range<usize>,
+    pub kind: ParserErrorKind,
 }
 
 // flatten the lexer error's span into the parser error
@@ -73,15 +73,18 @@ impl<'a> Parser<'a> {
     /// Tries to consume one of the token types provided in `expected_list` and extends the current
     /// span window to contain that token. If the next token is not withing `expected_list`,
     /// returns a [`ParserError`] of kind [`ParserErrorKind::UnexpectedToken`].
+    #[instrument(skip(self), level = "trace")]
     pub(crate) fn consume(
         &mut self,
         expected_list: &[Token],
     ) -> Result<&SpannedToken<'a>, ParseError> {
         let tok = self.lexer.next();
         if expected_list.contains(&tok.token) {
+            trace!(got = ?tok.token, "consumed token");
             self.current_span.end = tok.span.end;
             Ok(tok)
         } else {
+            trace!(got = ?tok.token, "could not consume");
             Err(ParseError {
                 span: tok.span.clone(),
                 kind: ParserErrorKind::unexpected_token(expected_list, &tok.token),
@@ -90,23 +93,28 @@ impl<'a> Parser<'a> {
     }
 
     /// Sync up to the next parsing restart point on errors.
+    #[instrument(skip_all, level = "trace")]
     fn sync(&mut self) {
         loop {
-            match self.lexer.peek().token {
+            match &self.lexer.peek().token {
                 // consume, nobody upstream wants this
                 Token::Semicolon => {
+                    trace!("synced to after semicolon");
                     self.lexer.advance();
                     break;
                 }
 
                 // break but do not consume, parent context owns these
-                Token::RBrace
+                token @ (Token::RBrace
                 | Token::RParen
                 | Token::Comma
                 | Token::Create
                 | Token::Select
                 | Token::Insert
-                | Token::Eof => break,
+                | Token::Eof) => {
+                    trace!("synced to {:?}", token);
+                    break;
+                }
 
                 // skip everything else
                 _ => self.lexer.advance(),

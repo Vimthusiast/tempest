@@ -1,5 +1,5 @@
 use crate::{
-    Parser, ParseError, ParserErrorKind,
+    ParseError, Parser, ParserErrorKind,
     ast::{CreateDatabaseStmt, CreateTableStmt, CreateTyStmt, InsertIntoStmt, SelectFromStmt},
     lexer::Token,
 };
@@ -14,6 +14,7 @@ pub enum Stmt<'a> {
 }
 
 impl<'a> Parser<'a> {
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_create_stmt(&mut self) -> Result<Stmt<'a>, ParseError> {
         self.current_span.start = self.consume(&[Token::Create])?.span.start;
         let tok = self.lexer.peek();
@@ -32,6 +33,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_stmt(&mut self) -> Result<Stmt<'a>, ParseError> {
         // start a new span
         self.current_span = 0..0;
@@ -51,6 +53,7 @@ impl<'a> Parser<'a> {
                         &stmt_start.token,
                     ),
                 });
+                self.lexer.advance();
                 self.sync();
                 err
             }

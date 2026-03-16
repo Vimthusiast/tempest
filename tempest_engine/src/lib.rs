@@ -12,8 +12,8 @@ use tempest_kv::{
 use tempest_tql::{ParseError, parse};
 
 use crate::{
-    base::{EngineComparer, KeySpace},
-    catalog::{Catalog, CatalogError},
+    base::EngineComparer,
+    catalog::{Catalog, CatalogError, CatalogState},
     config::EngineConfig,
     ctrl::hlc::HlcGenerator,
     query::{
@@ -25,19 +25,19 @@ use crate::{
         encoder::RowEncoder,
         resolved::ResolvedTable,
     },
-    types::TempestValue,
 };
 
 #[macro_use]
 extern crate tracing;
 
 mod base;
-mod catalog;
-pub mod config;
 mod ctrl;
-mod query;
 mod row;
-mod types;
+
+pub mod catalog;
+pub mod config;
+pub mod query;
+pub mod types;
 
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -225,6 +225,10 @@ impl<F: FioFS> Engine<F> {
             results.push(self.execute_plan(plan).await?);
         }
         Ok(results)
+    }
+
+    pub fn catalog(&self) -> &CatalogState {
+        &self.catalog
     }
 
     pub async fn shutdown(&mut self) -> Result<(), EngineError> {

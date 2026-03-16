@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use tempest_core::tempest_str::TempestStr;
 
-use crate::{Parser, ParseError, ParserErrorKind, lexer::Token};
+use crate::{ParseError, Parser, ParserErrorKind, lexer::Token};
 
 #[derive(Debug)]
 pub struct Ident<'a> {
@@ -18,10 +18,12 @@ impl<'a> Ident<'a> {
 }
 
 impl<'a> Parser<'a> {
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_ident(&mut self) -> Result<Ident<'a>, ParseError> {
         let tok = self.lexer.next();
         match &tok.token {
             Token::Identifier(name) => {
+                trace!(?name, "got identifier");
                 self.current_span.end = tok.span.end;
                 Ok(Ident {
                     name: name.clone(),
@@ -29,6 +31,7 @@ impl<'a> Parser<'a> {
                 })
             }
             _ => {
+                trace!(got = ?tok.token, "could not parse identifier");
                 let err = Err(ParseError {
                     span: tok.span.clone(),
                     kind: ParserErrorKind::unexpected_token(&[Token::empty_ident()], &tok.token),

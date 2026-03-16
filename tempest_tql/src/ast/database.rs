@@ -10,6 +10,7 @@ pub struct CreateDatabaseStmt<'a> {
 
 impl<'a> Parser<'a> {
     /// Assumes that `create` has already been parsed and the span is set.
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_create_database_stmt(
         &mut self,
     ) -> Result<CreateDatabaseStmt<'a>, ParseError> {

@@ -21,6 +21,7 @@ pub struct CreateTableStmt<'a> {
 }
 
 impl<'a> Parser<'a> {
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_table_decl_body(&mut self) -> Result<TableDeclBody<'a>, ParseError> {
         let body_span_start = self.consume(&[Token::LBrace])?.span.start;
         let mut primary_key = None;
@@ -77,6 +78,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Assumes that `create` has already been parsed and the span is set.
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_create_table_stmt(&mut self) -> Result<CreateTableStmt<'a>, ParseError> {
         self.consume(&[Token::Table])?;
         let path = self.parse_path()?;

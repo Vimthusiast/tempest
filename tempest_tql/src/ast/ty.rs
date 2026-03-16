@@ -82,6 +82,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Assumes that `create` has already been parsed and the span is set.
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_create_ty_stmt(&mut self) -> Result<CreateTyStmt<'a>, ParseError> {
         self.consume(&[Token::Type])?;
         let path = self.parse_path()?;

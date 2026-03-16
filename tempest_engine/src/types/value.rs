@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use bytes::{Bytes, BytesMut};
+use derive_more::Display;
 use serde::{Deserialize, Serialize};
 use strum::{EnumDiscriminants, EnumString, IntoStaticStr};
 use tempest_core::encoding::{
@@ -8,7 +9,7 @@ use tempest_core::encoding::{
     RawDecodeError,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, EnumDiscriminants)]
+#[derive(Debug, Display, Clone, PartialEq, Eq, PartialOrd, Ord, EnumDiscriminants)]
 #[strum_discriminants(
     name(TempestType),
     derive(Serialize, Deserialize, EnumString, IntoStaticStr),

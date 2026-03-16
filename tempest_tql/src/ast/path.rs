@@ -24,6 +24,7 @@ impl<'a> Path<'a> {
 }
 
 impl<'a> Parser<'a> {
+    #[instrument(skip_all, level = "trace")]
     pub(crate) fn parse_path(&mut self) -> Result<Path<'a>, ParseError> {
         let first = self.parse_ident()?;
         if self.lexer.peek().token == Token::Dot {

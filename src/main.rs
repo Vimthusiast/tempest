@@ -1,14 +1,33 @@
 use std::path::PathBuf;
 
-use tempest_core::fio::UringFileSystem;
-use tempest_engine::{Engine, config::EngineConfig};
+use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 use tracing_tree::HierarchicalLayer;
+
+use crate::repl::repl;
 
 #[macro_use]
 extern crate tracing;
 
-fn main() {
+mod repl;
+
+#[derive(Subcommand)]
+enum Command {
+    /// Starts an interactive REPL-Shell for a Tempest database
+    Repl {
+        /// The directory to create or open the database inside of
+        data_dir: PathBuf,
+    },
+}
+
+/// Tempest CLI.
+#[derive(Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+fn main() -> anyhow::Result<()> {
     let layer = HierarchicalLayer::default()
         .with_indent_lines(true)
         .with_bracketed_fields(true)
@@ -19,33 +38,9 @@ fn main() {
         .with(EnvFilter::from_default_env())
         .init();
 
-    tokio_uring::start(async {
-        let fs = UringFileSystem;
-        let root = PathBuf::from("./tmp/tempest");
-        let config = EngineConfig::default();
-        let mut engine = Engine::open(fs.clone(), root, config).await.unwrap();
+    let cli = Cli::parse();
 
-        engine.execute("create database main;").await.unwrap();
-
-        engine
-            .execute("create type main.User { id: Int64, username: String };")
-            .await
-            .unwrap();
-
-        engine
-            .execute("create table main.users : main.User { primary key (id) };")
-            .await
-            .unwrap();
-
-        engine
-            .execute("insert into main.users { id: 4, username: \"John\" };")
-            .await
-            .unwrap();
-        info!("inserted row for id=4, name=John");
-
-        let results = engine.execute("select * from main.users;").await.unwrap();
-        info!("{:?}", results);
-
-        engine.shutdown().await.unwrap();
-    })
+    match cli.command {
+        Command::Repl { data_dir } => repl(data_dir),
+    }
 }

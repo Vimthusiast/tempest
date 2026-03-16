@@ -24,7 +24,7 @@ mod tests;
 /// Implementation details like ID allocation are never recorded as edits.
 /// IDs are derived from the edits themselves during replay.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) enum CatalogEditV1 {
+pub enum CatalogEditV1 {
     /// Registers a new database with its assigned [`DatabaseId`].
     CreateDatabase((DatabaseId, DatabaseSchema)),
     /// Registers a new table with its assigned [`TableId`].
@@ -44,7 +44,7 @@ pub(crate) enum CatalogEditV1 {
 /// as new variants are added.
 #[repr(u16)]
 #[derive(derive_more::Debug, Serialize, Deserialize)]
-pub(crate) enum CatalogEdit {
+pub enum CatalogEdit {
     #[debug("{:?}", _0)]
     V1(CatalogEditV1) = 1,
 }
@@ -77,24 +77,24 @@ pub enum CatalogError {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct CatalogState {
+pub struct CatalogState {
     /// Monotonically increasing generator for the table IDs.
     /// Incremented automatically inside of [`Self::apply()].
     next_table_id: TableId,
     /// Contains the definitions of all tables, accessible through their unique, stable ID.
-    pub(crate) tables: HashMap<TableId, TableSchema>,
+    pub tables: HashMap<TableId, TableSchema>,
 
     /// Monotonically increasing generator for the database IDs.
     /// Incremented automatically inside of [`Self::apply()].
     next_database_id: DatabaseId,
     /// Contains the definitions of all databases, accessible through their unique, stable ID.
-    pub(crate) databases: HashMap<DatabaseId, DatabaseSchema>,
+    pub databases: HashMap<DatabaseId, DatabaseSchema>,
 
     /// Monotonically increasing generator for the type IDs.
     /// Incremented automatically inside of [`Self::apply()].
     next_type_id: TypeId,
     /// Contains the definitions of all types, accessible through their unique, stable ID.
-    pub(crate) types: HashMap<TypeId, TypeSchema>,
+    pub types: HashMap<TypeId, TypeSchema>,
 }
 
 impl CatalogState {
@@ -191,6 +191,25 @@ impl CatalogState {
         }
         None
     }
+
+    pub fn tables_in_database(
+        &self,
+        database: &str,
+    ) -> impl Iterator<Item = (TableId, &TableSchema)> {
+        self.databases
+            .iter()
+            .filter(|(_, db)| Some(&db.name) == TempestStr::from_borrowed(database).ok().as_ref())
+            .map(|(_, db)| db.tables.iter().map(|t| (*t, &self.tables[t])))
+            .flatten()
+    }
+
+    pub fn types_in_database(&self, database: &str) -> impl Iterator<Item = (TypeId, &TypeSchema)> {
+        self.databases
+            .iter()
+            .filter(|(_, db)| Some(&db.name) == TempestStr::from_borrowed(database).ok().as_ref())
+            .map(|(_, db)| db.types.iter().map(|t| (*t, &self.types[t])))
+            .flatten()
+    }
 }
 
 impl Replayable for CatalogState {
@@ -222,6 +241,12 @@ impl Replayable for CatalogState {
                     debug!(?id, ?schema, "applying create type edit");
                     assert!(!self.types.contains_key(&id));
                     self.next_type_id = TypeId(*id + 1).max(self.next_type_id);
+                    // add the id to the database's table set
+                    self.databases
+                        .get_mut(&schema.database_id)
+                        .expect("database must exist when applying CreateType")
+                        .types
+                        .insert(id);
                     self.types.insert(id, schema);
                 }
                 CatalogEditV1::Snapshot(edits) => {

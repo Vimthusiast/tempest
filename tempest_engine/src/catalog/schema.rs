@@ -58,7 +58,7 @@ pub struct TypeId(pub u32);
 pub struct TableId(pub u32);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct FieldDef {
+pub struct FieldDef {
     /// Name of this column.
     pub name: TempestStr<'static>,
     /// Type of this column.
@@ -66,7 +66,7 @@ pub(crate) struct FieldDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TypeSchema {
+pub struct TypeSchema {
     /// The ID of the database this type is scoped to.
     pub database_id: DatabaseId,
     /// The scope-unique name of this type.
@@ -76,7 +76,7 @@ pub(crate) struct TypeSchema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TableSchema {
+pub struct TableSchema {
     /// The unique ID of the database this table belongs to.
     pub database_id: DatabaseId,
     /// Name of this table.
@@ -106,11 +106,13 @@ pub(crate) struct TableSchema {
 pub struct DatabaseId(pub u32);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct DatabaseSchema {
+pub struct DatabaseSchema {
     /// Name of this dtabase.
     pub name: TempestStr<'static>,
     /// The tables this database contains.
     pub tables: HashSet<TableId>,
+    /// The types this database contains.
+    pub types: HashSet<TypeId>,
 }
 
 impl DatabaseSchema {
@@ -118,6 +120,7 @@ impl DatabaseSchema {
         Self {
             name,
             tables: HashSet::new(),
+            types: HashSet::new(),
         }
     }
 }
