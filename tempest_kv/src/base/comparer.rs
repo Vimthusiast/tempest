@@ -4,7 +4,51 @@ use std::cmp;
 
 use tempest_core::utils::PrettyBytes;
 
-/// Abstraction over compare implementations from the user side of this storage.
+/// Defines how keys are split, compared, and ordered within the storage layer.
+///
+/// Every key in Tempest's LSM storage consists of two parts: a **prefix** that
+/// identifies the logical entry (e.g. a row), and an optional **suffix** that
+/// encodes a version (e.g. an HLC timestamp). The `Comparer` trait abstracts
+/// over both, allowing the engine to attach arbitrary versioning semantics to
+/// keys without the KV layer needing to understand them.
+///
+/// # Prefix and Suffix
+///
+/// [`split`] determines where the prefix ends and the suffix begins. If a key
+/// has no suffix, [`split`] returns the full key length, and [`compare_suffix`]
+/// is never meaningfully called.
+///
+/// # Physical vs. Logical Ordering
+///
+/// Two distinct orderings are derived from the prefix/suffix split:
+///
+/// - **Physical** ([`compare_physical`]): the on-disk sort order. Keys are
+///   ordered ascending by prefix, then by suffix. This is what SSTs and
+///   MemTables use to store and seek entries.
+///
+/// - **Logical** ([`compare_logical`]): the identity used for deduplication.
+///   Two keys with equal prefixes are considered the *same row*, regardless of
+///   their suffix. This is what compaction and MVCC iterators use to collapse
+///   multiple versions of a row down to one.
+///
+/// # Suffix Ordering Convention
+///
+/// The direction of [`compare_suffix`] has semantic consequences for any
+/// iterator that relies on forward scanning. If the suffix sorts **descending**
+/// (i.e. `compare_suffix` returns `b.cmp(a)`), the newest version of a row
+/// appears first in a forward scan, which is required for correct behavior of
+/// both prefix deduplication (keep the first = newest) and suffix-bound
+/// filtering (skip entries newer than the read timestamp).
+///
+/// Implementors that do not need versioning (like [`DefaultComparer`]) can
+/// return [`Ordering::Equal`] from [`compare_suffix`], which makes all
+/// iterators behave as if there is only ever one version per key.
+///
+/// [`split`]: Comparer::split
+/// [`compare_suffix`]: Comparer::compare_suffix
+/// [`compare_physical`]: Comparer::compare_physical
+/// [`compare_logical`]: Comparer::compare_logical
+/// [`Ordering::Equal`]: std::cmp::Ordering::Equal
 pub trait Comparer: Default + Clone + 'static {
     /// Returns the index where the version suffix starts.
     /// If there is no suffix, returns the length of the slice.
@@ -22,18 +66,24 @@ pub trait Comparer: Default + Clone + 'static {
         key.split_at(knon)
     }
 
-    /// Compares the logical part (user facing) of a key.
-    /// By default, this will compare the prefixes, but a different strategy may be chosen.
-    /// This is used in things like key deduplication, e.g. during compaction, meaning
-    /// any part that is ignored during logical compare will end up being overshadowed.
+    /// Compares only the prefix (logical identity) of two keys, ignoring the suffix.
+    ///
+    /// Two keys are logically equal if their prefixes compare equal, regardless of
+    /// their suffix. This is the identity used for deduplication - the suffix
+    /// encodes a version of the row, not a distinct row.
     fn compare_logical(a: &[u8], b: &[u8]) -> cmp::Ordering {
         let anon = Self::split(a);
         let bnon = Self::split(b);
         Self::compare_prefix(&a[..anon], &b[..bnon])
     }
 
-    /// Full comparison of two different keys, for physically ordering them in SSTs/MemTables.
-    /// It first compares them ascending by the prefix, and then ascending by the suffix.
+    /// Compares two keys by their full physical ordering: ascending by prefix,
+    /// then ascending by suffix.
+    ///
+    /// This is the sort order used on-disk in SSTs and MemTables. For a comparer
+    /// with a descending suffix (e.g. HLC timestamps stored as `b.cmp(a)`), keys
+    /// with the same prefix will sort with the newest version first, which is
+    /// required for correct behavior of forward-scanning iterators.
     fn compare_physical(a: &[u8], b: &[u8]) -> cmp::Ordering {
         let anon = Self::split(a);
         let bnon = Self::split(b);

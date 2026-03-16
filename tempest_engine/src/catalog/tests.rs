@@ -7,6 +7,7 @@ fn make_db(name: &'static str) -> DatabaseSchema {
     DatabaseSchema {
         name: name.into(),
         tables: Default::default(),
+        types: Default::default(),
     }
 }
 
